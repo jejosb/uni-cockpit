@@ -1,8 +1,8 @@
 import logging
 
 import httpx
-from tests.conftest import FIXTURES, SECRET_TOKEN, SECRET_URL, read_fixture
 
+from tests.conftest import FIXTURES, SECRET_TOKEN, SECRET_URL, read_fixture
 from uni_cockpit.logging_config import configure_logging
 from uni_cockpit.services.fetcher import FeedFetchError, UrlCalendarFetcher
 

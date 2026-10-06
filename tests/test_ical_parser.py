@@ -1,7 +1,6 @@
 from datetime import UTC, datetime
 
 from tests.conftest import read_fixture
-
 from uni_cockpit.feeds.ical import parse_icalendar
 from uni_cockpit.feeds.relax import RelaxDeadlineAdapter
 
