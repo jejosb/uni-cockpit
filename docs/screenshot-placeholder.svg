@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="520" viewBox="0 0 880 520" role="img" aria-label="Screenshot placeholder">
+  <rect width="880" height="520" fill="#f3efe6"/>
+  <text x="48" y="64" fill="#0f5c45" font-family="Georgia, serif" font-size="14">HOCHSCHULE REUTLINGEN</text>
+  <text x="48" y="104" fill="#1d1914" font-family="Georgia, serif" font-size="36">uni-cockpit</text>
+  <text x="48" y="140" fill="#5c564c" font-family="sans-serif" font-size="16">Screenshot placeholder  open deadlines from a RELAX iCalendar feed</text>
+  <rect x="48" y="176" width="784" height="92" rx="18" fill="#fff1e4" stroke="#f0c2a4"/>
+  <rect x="48" y="176" width="6" height="92" fill="#9a3412"/>
+  <text x="72" y="208" fill="#5c564c" font-family="sans-serif" font-size="12">ALG</text>
+  <text x="72" y="234" fill="#1d1914" font-family="Georgia, serif" font-size="22">Problem sheet is due</text>
+  <text x="620" y="226" fill="#9a3412" font-family="sans-serif" font-size="14">unter 24 Stunden</text>
+  <rect x="48" y="284" width="784" height="92" rx="18" fill="#fffdf8" stroke="#e4dccb"/>
+  <text x="72" y="316" fill="#5c564c" font-family="sans-serif" font-size="12">DBSYS</text>
+  <text x="72" y="342" fill="#1d1914" font-family="Georgia, serif" font-size="22">Lab report is due</text>
+  <text x="620" y="334" fill="#1d1914" font-family="sans-serif" font-size="16">noch 2 Tage 4 Std.</text>
+  <rect x="48" y="392" width="784" height="92" rx="18" fill="#fffdf8" stroke="#e4dccb"/>
+  <text x="72" y="424" fill="#5c564c" font-family="sans-serif" font-size="12">OHNE KURS</text>
+  <text x="72" y="450" fill="#1d1914" font-family="Georgia, serif" font-size="22">Reading notes are due</text>
+</svg>
