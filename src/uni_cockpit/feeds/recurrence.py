@@ -10,6 +10,14 @@ trailing ``Z``, a floating local time, or a custom ``VTIMEZONE`` name.
 RELAX deadlines are not expanded here, so a Zulu deadline stays on its UTC
 instant.
 
+A trailing ``Z`` is expanded the way RFC 5545 specifies, so every raw
+occurrence stays at the same UTC time. Exceptions are applied to that raw
+series, and each surviving occurrence is then moved onto the Berlin wall
+clock. An ``EXDATE`` or ``RECURRENCE-ID`` matches a slot when it equals
+either instant: the raw UTC time (``08:15Z`` after the clock change) or the
+normalized Berlin time (``09:15Z``). The two names are one slot, so a
+cancellation or a move cannot leave a second copy behind.
+
 COUNT/UNTIL are applied by the recurrence rule first. EXDATE then removes
 those occurrences unless a RECURRENCE-ID override puts the slot back at a
 new time. A rule without COUNT or UNTIL is capped so an open-ended feed
@@ -85,32 +93,61 @@ def _expand_group(group: list[ParsedEvent]) -> list[Occurrence]:
 
 
 def _expand_series(master: ParsedEvent, overrides: list[ParsedEvent]) -> list[Occurrence]:
-    pending = {
-        _key(event.recurrence_id): event for event in overrides if event.recurrence_id is not None
-    }
+    pending: dict[datetime, ParsedEvent] = {}
+    for event in overrides:
+        if event.recurrence_id is not None:
+            pending.setdefault(_key(event.recurrence_id), event)
     exdates = {_key(moment) for moment in master.exception_dates}
     produced: dict[str, Occurrence] = {}
-    for start in _rule_starts(master):
-        slot = _key(start)
-        override = pending.pop(slot, None)
-        if slot in exdates and override is None:
+    consumed: set[datetime] = set()
+    for raw in _rfc_starts(master):
+        normalized = _berlin_occurrence(master, raw)
+        raw_key = _key(raw)
+        norm_key = _key(normalized)
+        override = _take_override(pending, raw_key, norm_key)
+        if norm_key in consumed:
+            continue
+        consumed.add(norm_key)
+        cancelled = override is None and (raw_key in exdates or norm_key in exdates)
+        if cancelled:
             continue
         if override is None:
-            occurrence = _from_master(master, start)
+            occurrence = _from_master(master, normalized)
         else:
             occurrence = _from_override(master, override)
-        produced[occurrence.uid] = occurrence
+        produced.setdefault(occurrence.uid, occurrence)
     for override in pending.values():
         occurrence = _from_override(master, override)
-        produced[occurrence.uid] = occurrence
+        produced.setdefault(occurrence.uid, occurrence)
     return list(produced.values())
 
 
-def _rule_starts(master: ParsedEvent) -> list[datetime]:
+def _take_override(
+    pending: dict[datetime, ParsedEvent],
+    raw_key: datetime,
+    norm_key: datetime,
+) -> ParsedEvent | None:
+    """One slot may be named by the raw RFC instant or the Berlin instant.
+
+    Pop both names so the second cannot be emitted again as its own occurrence.
+    When both names are present, the raw RFC instant wins.
+    """
+    match = pending.pop(raw_key, None)
+    if norm_key == raw_key:
+        return match
+    other = pending.pop(norm_key, None)
+    return match if match is not None else other
+
+
+def _rfc_starts(master: ParsedEvent) -> list[datetime]:
+    """Occurrences at the instants RFC 5545 would generate, before Berlin normalization."""
     if not master.recurrence_rule:
         return []
-    local_start = _local_start(master)
-    rule = rrulestr(master.recurrence_rule, dtstart=local_start)
+    if master.start_zone.upper() == "UTC":
+        anchor = ensure_utc(master.starts_at)
+    else:
+        anchor = _local_start(master)
+    rule = rrulestr(master.recurrence_rule, dtstart=anchor)
     upper = master.recurrence_rule.upper()
     bounded = "COUNT=" in upper or "UNTIL=" in upper
     limit = _MAX_OCCURRENCES if bounded else _OPEN_ENDED_WEEKS
@@ -123,6 +160,13 @@ def _rule_starts(master: ParsedEvent) -> list[datetime]:
             continue
         starts.append(item)
     return starts
+
+
+def _berlin_occurrence(master: ParsedEvent, raw_start: datetime) -> datetime:
+    """Same civil date as the raw instant, at the series' Berlin wall-clock time."""
+    wall = _local_start(master)
+    local_date = ensure_utc(raw_start).astimezone(BERLIN).date()
+    return datetime.combine(local_date, wall.time(), tzinfo=BERLIN)
 
 
 def _local_start(master: ParsedEvent) -> datetime:

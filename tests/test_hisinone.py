@@ -23,7 +23,7 @@ from uni_cockpit.services.importer import (
 )
 from uni_cockpit.services.reminders import reminder_is_current, reschedule_reminders
 from uni_cockpit.services.timetable import lectures_between, week_bounds
-from uni_cockpit.timeutil import ensure_utc, format_clock_range
+from uni_cockpit.timeutil import ensure_utc, format_clock_range, to_berlin
 
 SECRET_HIS_TOKEN = "fixture-his-token-not-real"
 SECRET_HIS_URL = f"https://calendar.example.edu/hisinone/timetable.ics?token={SECRET_HIS_TOKEN}"
@@ -308,6 +308,54 @@ def test_exdate_and_recurrence_id_apply_after_the_dst_change():
     assert zulu_moved.starts_at == datetime(2026, 11, 3, 13, 15, tzinfo=UTC)
     assert zulu_moved.location == "Room 3.22"
     assert by_uid["his-move@calendar.example.edu#20261027T091500Z"].location == "Room 3.10"
+    assert by_uid["his-z-cancel@calendar.example.edu#20261110T091500Z"].starts_at == datetime(
+        2026, 11, 10, 9, 15, tzinfo=UTC
+    )
+
+
+def test_rfc_zulu_exdate_and_recurrence_id_match_the_unshifted_utc_instant():
+    parsed = parse_icalendar(read_fixture("hisinone_rfc_zulu.ics"))
+    drafts = HisinoneTimetableAdapter().adapt_all(parsed.events)
+    assert len(drafts) == len({draft.uid for draft in drafts})
+
+    def series(prefix: str) -> list:
+        return [draft for draft in drafts if draft.uid.startswith(prefix)]
+
+    def on_day(prefix: str, day: date) -> list:
+        return [draft for draft in series(prefix) if to_berlin(draft.starts_at).date() == day]
+
+    november = date(2026, 11, 3)
+    original_slots = {
+        datetime(2026, 11, 3, 8, 15, tzinfo=UTC),
+        datetime(2026, 11, 3, 9, 15, tzinfo=UTC),
+    }
+    cancel = series("his-rfc-cancel@calendar.example.edu")
+    assert len(cancel) == 5
+    assert on_day("his-rfc-cancel@", november) == []
+    assert all(ensure_utc(draft.starts_at) not in original_slots for draft in cancel)
+    kept = on_day("his-rfc-cancel@", date(2026, 11, 10))
+    assert len(kept) == 1
+    assert kept[0].starts_at == datetime(2026, 11, 10, 9, 15, tzinfo=UTC)
+    assert format_clock_range(kept[0].starts_at, kept[0].ends_at) == "10:15–11:45 CET"
+
+    both = series("his-rfc-both@calendar.example.edu")
+    assert len(both) == 5
+    assert on_day("his-rfc-both@", november) == []
+    assert any(to_berlin(draft.starts_at).date() == date(2026, 11, 10) for draft in both)
+
+    move_on_day = on_day("his-rfc-move@", november)
+    assert len(move_on_day) == 1
+    moved = move_on_day[0]
+    assert moved.starts_at == datetime(2026, 11, 3, 13, 15, tzinfo=UTC)
+    assert moved.ends_at == datetime(2026, 11, 3, 14, 45, tzinfo=UTC)
+    assert moved.location == "Room 3.22"
+    assert format_clock_range(moved.starts_at, moved.ends_at) == "14:15–15:45 CET"
+    assert moved.starts_at not in original_slots
+    moved_uids = {draft.uid for draft in drafts}
+    assert "his-rfc-move@calendar.example.edu#20261103T091500Z" not in moved_uids
+    week_before = on_day("his-rfc-move@", date(2026, 10, 27))
+    assert len(week_before) == 1
+    assert week_before[0].starts_at == datetime(2026, 10, 27, 9, 15, tzinfo=UTC)
 
 
 def test_weekly_lecture_keeps_berlin_wall_time_for_every_encoding():
