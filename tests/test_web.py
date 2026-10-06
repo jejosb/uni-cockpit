@@ -1,5 +1,7 @@
+import logging
 import re
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import Session, select
@@ -13,11 +15,13 @@ from tests.conftest import (
     make_settings,
     read_fixture,
 )
+from tests.test_urls import DISALLOWED_HTTPS_URLS
 from uni_cockpit.app import create_app
 from uni_cockpit.config import Settings
 from uni_cockpit.models import CalendarEvent
-from uni_cockpit.services.fetcher import FeedFetchError
+from uni_cockpit.services.fetcher import FeedFetchError, UrlCalendarFetcher
 from uni_cockpit.services.importer import stored_relax_url
+from uni_cockpit.services.urls import HOST_NOT_ALLOWED_MESSAGE
 
 
 def _client(
@@ -27,8 +31,16 @@ def _client(
     payload: bytes | None = None,
     fail: bool = False,
     allow_local: bool = True,
+    allowed_hosts: str | None = None,
 ):
-    application = create_app(make_settings(tmp_path, url, allow_local=allow_local))
+    application = create_app(
+        make_settings(
+            tmp_path,
+            url,
+            allow_local=allow_local,
+            allowed_hosts=allowed_hosts,
+        )
+    )
     application.state.clock = FixedClock(FROZEN_NOW)
     if fail:
         application.state.fetcher = _FailingFetcher()
@@ -140,9 +152,12 @@ def test_empty_state_when_nothing_is_open(tmp_path):
 
 
 def test_failed_reload_keeps_deadlines_and_hides_the_url(tmp_path, caplog):
-    import logging
-
-    application = _client(tmp_path, None, payload=read_fixture("relax_deadlines.ics"))
+    application = _client(
+        tmp_path,
+        None,
+        payload=read_fixture("relax_deadlines.ics"),
+        allowed_hosts="calendar.example.edu",
+    )
     with TestClient(application) as client:
         saved = client.post("/settings", data={"calendar_url": SECRET_URL}, follow_redirects=True)
         assert "Lab report is due" in saved.text
@@ -161,7 +176,12 @@ def test_failed_reload_keeps_deadlines_and_hides_the_url(tmp_path, caplog):
 
 
 def test_htmx_import_returns_the_deadline_list(tmp_path):
-    application = _client(tmp_path, None, payload=read_fixture("relax_deadlines.ics"))
+    application = _client(
+        tmp_path,
+        None,
+        payload=read_fixture("relax_deadlines.ics"),
+        allowed_hosts="calendar.example.edu",
+    )
     with TestClient(application) as client:
         client.post("/settings", data={"calendar_url": SECRET_URL}, follow_redirects=True)
         partial = client.post("/import", headers={"HX-Request": "true"})
@@ -241,6 +261,7 @@ def test_https_settings_still_work_when_local_feeds_disabled(tmp_path):
         None,
         payload=read_fixture("relax_deadlines.ics"),
         allow_local=False,
+        allowed_hosts="calendar.example.edu",
     )
     with TestClient(application) as client:
         response = client.post(
@@ -263,6 +284,98 @@ def test_settings_rejects_a_url_without_echoing_it(tmp_path):
     assert response.status_code == 400
     assert "https://" in response.text
     assert SECRET_TOKEN not in response.text
+
+
+def _poison(url: str) -> str:
+    if "authtoken=" in url:
+        return url
+    join = "&" if "?" in url else "?"
+    return f"{url}{join}authtoken={SECRET_TOKEN}"
+
+
+@pytest.mark.parametrize("allow_local", [False, True])
+@pytest.mark.parametrize("submitted", DISALLOWED_HTTPS_URLS)
+def test_settings_rejects_host_outside_the_allowlist(tmp_path, caplog, allow_local, submitted):
+    poisoned = _poison(submitted)
+    application = _client(tmp_path, None, allow_local=allow_local)
+    with caplog.at_level(logging.DEBUG), TestClient(application) as client:
+        response = client.post("/settings", data={"calendar_url": poisoned})
+        with Session(application.state.engine, expire_on_commit=False) as session:
+            stored = stored_relax_url(session)
+
+    assert response.status_code == 400
+    assert HOST_NOT_ALLOWED_MESSAGE in response.text
+    assert poisoned not in response.text
+    assert SECRET_TOKEN not in response.text
+    assert SECRET_TOKEN not in caplog.text
+    assert poisoned not in caplog.text
+    assert stored is None
+
+
+def test_settings_accepts_the_allowlisted_host(tmp_path):
+    application = _client(
+        tmp_path,
+        None,
+        payload=read_fixture("relax_deadlines.ics"),
+        allow_local=False,
+    )
+    submitted = (
+        "https://RELAX.Reutlingen-University.DE./calendar/export_execute.php"
+        f"?userid=1&authtoken={SECRET_TOKEN}"
+    )
+    with TestClient(application) as client:
+        response = client.post(
+            "/settings",
+            data={"calendar_url": submitted},
+            follow_redirects=True,
+        )
+
+    assert "Lab report is due" in response.text
+    assert SECRET_TOKEN not in response.text
+    assert submitted not in response.text
+
+
+def test_dev_file_feed_bypasses_the_allowlist(tmp_path):
+    url = FIXTURES.joinpath("relax_deadlines.ics").resolve().as_uri()
+    application = _client(tmp_path, url, allow_local=True, allowed_hosts="calendar.example.edu")
+    with TestClient(application) as client:
+        body = client.get("/").text
+
+    assert "Lab report is due" in body
+    assert url not in body
+
+
+def test_startup_rejects_foreign_host_without_a_request(tmp_path, caplog):
+    application = _client(tmp_path, SECRET_URL, allow_local=False)
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        return httpx.Response(500)
+
+    application.state.fetcher = UrlCalendarFetcher(
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        allow_local=application.state.settings.dev_allow_local_feeds,
+        allowed_hosts=application.state.settings.feed_allowed_hosts,
+    )
+    with caplog.at_level(logging.DEBUG), TestClient(application) as client:
+        page = client.get("/")
+
+    assert seen == []
+    assert HOST_NOT_ALLOWED_MESSAGE in page.text
+    assert SECRET_TOKEN not in page.text
+    assert SECRET_URL not in page.text
+    assert "calendar.example.edu" not in page.text
+    assert SECRET_TOKEN not in caplog.text
+    assert SECRET_URL not in caplog.text
+    assert "calendar.example.edu" not in caplog.text
+    assert "authtoken" not in caplog.text
+
+
+def test_fetcher_receives_the_settings_allowlist(tmp_path):
+    application = _client(tmp_path, None, allowed_hosts=" Calendar.Example.EDU. ")
+    assert application.state.fetcher._allowed_hosts == application.state.settings.feed_allowed_hosts
+    assert application.state.settings.feed_allowed_hosts == frozenset({"calendar.example.edu"})
 
 
 def test_reminder_offset_placeholder_is_configured(monkeypatch):

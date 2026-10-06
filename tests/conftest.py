@@ -49,15 +49,24 @@ def session(engine):
         yield db_session
 
 
-def make_settings(tmp_path, url: str | None, *, allow_local: bool = True) -> Settings:
+def make_settings(
+    tmp_path,
+    url: str | None,
+    *,
+    allow_local: bool = True,
+    allowed_hosts: str | None = None,
+) -> Settings:
     """Test apps load fixtures via file://, so the dev flag defaults to on.
 
     Pass `allow_local=False` to exercise the production policy. The value is
-    explicit Settings state, not an environment fallback.
+    explicit Settings state, not an environment fallback. `allowed_hosts`
+    overrides `FEED_ALLOWED_HOSTS`; omitted, the production default is used.
     """
+    hosts = "relax.reutlingen-university.de" if allowed_hosts is None else allowed_hosts
     return Settings(
         relax_ical_url=url,
         database_url=f"sqlite:///{tmp_path / 'cockpit.db'}",
         dev_allow_local_feeds=allow_local,
+        feed_allowed_hosts=hosts,
         _env_file=None,
     )

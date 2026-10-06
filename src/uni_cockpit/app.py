@@ -52,7 +52,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="uni-cockpit", lifespan=lifespan)
     app.state.settings = settings
     app.state.engine = engine
-    app.state.fetcher = UrlCalendarFetcher(allow_local=settings.dev_allow_local_feeds)
+    app.state.fetcher = UrlCalendarFetcher(
+        allow_local=settings.dev_allow_local_feeds,
+        allowed_hosts=settings.feed_allowed_hosts,
+    )
     app.state.clock = SystemClock()
     app.state.import_error = None
     app.state.import_notice = None
@@ -81,6 +84,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             url = validate_calendar_url(
                 calendar_url,
                 allow_local=request.app.state.settings.dev_allow_local_feeds,
+                allowed_hosts=request.app.state.settings.feed_allowed_hosts,
             )
         except CalendarUrlError as exc:
             return _render_settings(request, error=str(exc), status_code=400)

@@ -16,7 +16,7 @@ from uni_cockpit.feeds.ical import CalendarParseError, parse_icalendar
 from uni_cockpit.feeds.parsed import EventDraft
 from uni_cockpit.feeds.relax import RelaxDeadlineAdapter
 from uni_cockpit.models import CalendarEvent, FeedSource
-from uni_cockpit.services.fetcher import FeedFetchError, LocalFeedDisabledError
+from uni_cockpit.services.fetcher import FeedFetchError, HostNotAllowedError, LocalFeedDisabledError
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +73,9 @@ def import_from_configured_url(session: Session, settings: Settings, fetcher) ->
         raise missing_url_error()
     try:
         payload = fetcher.fetch(url)
+    except HostNotAllowedError as exc:
+        logger.warning("calendar import rejected a host outside the allowlist")
+        raise CalendarImportError("host", str(exc)) from None
     except LocalFeedDisabledError as exc:
         logger.warning("calendar import rejected a local feed")
         raise CalendarImportError("local", str(exc)) from None

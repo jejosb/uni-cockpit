@@ -10,7 +10,7 @@ This repository is the Sprint 1 foundation: store the feed once, import it, and 
 
 ## What it does today
 
-- Reads `RELAX_ICAL_URL`, or a URL saved from the settings page into the local SQLite database.
+- Reads `RELAX_ICAL_URL`, or a URL saved from the settings page into the local SQLite database. Only hosts listed in `FEED_ALLOWED_HOSTS` are accepted.
 - Imports every complete event with its title, course, due instant, and iCalendar UID.
 - Skips a broken event, logs that it was skipped, and keeps importing the rest.
 - If the feed cannot be loaded or is not iCalendar, shows an error and leaves existing rows in place.
@@ -46,7 +46,11 @@ cp .env.example .env
 
 Put the export URL in `.env` as `RELAX_ICAL_URL`. You can also leave that variable empty and paste the URL on the Kalender page. The page stores it in `data/cockpit.db`, which is git-ignored. When both are set, the environment variable wins.
 
-By default the app accepts only `https://` calendar URLs. `http://` (including `localhost` and `127.0.0.1`), `file://`, and local `.ics` paths are rejected, on the settings page and when they come from `RELAX_ICAL_URL`. That keeps a deployed process from reading local files or calling internal HTTP services. Set `DEV_ALLOW_LOCAL_FEEDS=true` only on your own machine when you want a fixture or `http://localhost`. Leave it unset or `false` everywhere else. Redirects are not followed; the RELAX export is used as given.
+By default the app accepts only `https://` calendar URLs whose host is listed in `FEED_ALLOWED_HOSTS`. The default list is `relax.reutlingen-university.de` alone; the HISinOne timetable host will be added later. Hosts are compared exactly after the name is lowercased, converted to ASCII (IDNA), and stripped of one trailing dot. `relax.reutlingen-university.de.` is therefore the same host, while a suffix such as `relax.reutlingen-university.de.evil.example`, a subdomain, or any other name is not. URLs with userinfo (`user@host`) and ports other than 443 are rejected. An empty `FEED_ALLOWED_HOSTS` keeps that default and never means every host is allowed.
+
+`http://` (including `localhost` and `127.0.0.1`), `file://`, and local `.ics` paths are rejected, on the settings page and when they come from `RELAX_ICAL_URL`. That keeps a deployed process from reading local files or calling internal services. Set `DEV_ALLOW_LOCAL_FEEDS=true` only on your own machine when you want a fixture or `http://localhost`. Those local feeds skip the host list. Any other `https://` host is still checked against `FEED_ALLOWED_HOSTS`, including in development. Leave the flag unset or `false` everywhere else. Redirects are not followed; the RELAX export is used as given.
+
+The same settings object supplies the allowlist when a URL is saved and on every fetch, including the startup import of `RELAX_ICAL_URL` and a later re-fetch.
 
 `REMINDER_OFFSETS_HOURS` defaults to `72,24`. Nothing reads it yet. The next story will use it for Telegram reminders. `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` stay empty until then.
 
