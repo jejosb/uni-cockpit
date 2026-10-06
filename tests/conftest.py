@@ -53,4 +53,8 @@ def make_settings(tmp_path, url: str | None) -> Settings:
     return Settings(
         relax_ical_url=url,
         database_url=f"sqlite:///{tmp_path / 'cockpit.db'}",
+        reminder_offsets_hours="72,24",
+        telegram_bot_token=None,
+        telegram_chat_id=None,
+        _env_file=None,
     )

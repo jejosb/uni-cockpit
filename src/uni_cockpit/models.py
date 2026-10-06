@@ -3,7 +3,7 @@
 Rows are deduplicated by `(source, uid)`. `is_done` and `done_at` survive a
 re-import because the RELAX feed has no submission status. `removed_at` is
 reserved for events that disappear from a later fetch. Telegram reminders are
-not stored in this release.
+not stored here; the process schedules them in memory from these rows.
 """
 
 from datetime import datetime

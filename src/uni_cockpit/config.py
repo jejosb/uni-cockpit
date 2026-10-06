@@ -1,8 +1,10 @@
 """Runtime configuration.
 
-Secrets stay in the environment or the local database. `reminder_offsets_hours`
-is only stored here so the next story can read it; this release does not send
-reminders. Offsets are elapsed UTC hours (see the README section "Time handling").
+Secrets stay in the environment or the local database. Bot token and chat id
+are read only from ``TELEGRAM_BOT_TOKEN`` and ``TELEGRAM_CHAT_ID``.
+``reminder_offsets_hours`` is the raw ``REMINDER_OFFSETS_HOURS`` string;
+parsing (and the fallback to 72,24) lives in ``services.reminders``. Offsets
+are elapsed UTC hours (see the README section "Time handling").
 """
 
 from pydantic import Field

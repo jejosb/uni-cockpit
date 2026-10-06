@@ -2,7 +2,9 @@
 
 Re-importing the same UID updates the visible fields and leaves `is_done`
 untouched. A failed download or an unreadable feed raises before any row is
-changed.
+changed. This module does not talk to Telegram. After a successful import,
+the app calls ``app.state.reminders.reschedule`` so reminder jobs follow the
+new rows.
 """
 
 import logging
