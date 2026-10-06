@@ -1,9 +1,9 @@
 """Load a calendar feed from HTTPS or, in development, a local fixture path.
 
 The feed URL is never written to the log. Callers turn failures into a fixed
-message that also omits the URL. `file://` and filesystem paths are refused
-unless `DEV_ALLOW_LOCAL_FEEDS` is on, so a deployed server cannot be pointed
-at arbitrary local files.
+message that also omits the URL. `file://`, filesystem paths, and `http://` on
+localhost are refused unless `allow_local` is true. Redirects are not followed:
+a 3xx response is a fetch error, and the `Location` header is not logged.
 """
 
 import logging
@@ -13,7 +13,7 @@ from urllib.parse import unquote, urlsplit
 import httpx
 
 from uni_cockpit.logging_config import configure_logging
-from uni_cockpit.services.urls import LOCAL_FEEDS_DISABLED_MESSAGE, local_feeds_allowed
+from uni_cockpit.services.urls import LOCAL_FEEDS_DISABLED_MESSAGE
 
 logger = logging.getLogger(__name__)
 
@@ -39,12 +39,19 @@ class LocalFeedDisabledError(FeedFetchError):
 
 
 class UrlCalendarFetcher:
+    """Fetch one calendar. `allow_local` is `Settings.dev_allow_local_feeds`.
+
+    Pass that value from the same `Settings` instance the app uses. A later
+    re-fetch job must do the same so it cannot drift from the settings page.
+    """
+
     def __init__(
         self,
         client: httpx.Client | None = None,
         timeout: float = 20.0,
         max_bytes: int = _MAX_BYTES,
-        allow_local: bool | None = None,
+        *,
+        allow_local: bool,
     ) -> None:
         self._client = client
         self._timeout = timeout
@@ -54,20 +61,17 @@ class UrlCalendarFetcher:
     def fetch(self, url: str) -> bytes:
         configure_logging()
         parts = urlsplit(url)
-        if parts.scheme in {"", "file"}:
-            if not self._local_allowed():
+        if parts.scheme == "https":
+            return self._read_http(url)
+        if parts.scheme in {"", "file"} or _localhost_http(parts.hostname, parts.scheme):
+            if not self._allow_local:
                 logger.warning("local calendar feed rejected")
                 raise LocalFeedDisabledError
-            return self._read_file(url)
-        if parts.scheme == "https" or _localhost_http(parts.hostname, parts.scheme):
+            if parts.scheme in {"", "file"}:
+                return self._read_file(url)
             return self._read_http(url)
         logger.warning("calendar url scheme is not allowed")
         raise FeedFetchError
-
-    def _local_allowed(self) -> bool:
-        if self._allow_local is not None:
-            return self._allow_local
-        return local_feeds_allowed()
 
     def _read_file(self, url: str) -> bytes:
         path = _file_path(url)
@@ -80,7 +84,7 @@ class UrlCalendarFetcher:
 
     def _read_http(self, url: str) -> bytes:
         owns_client = self._client is None
-        client = self._client or httpx.Client(timeout=self._timeout, follow_redirects=True)
+        client = self._client or httpx.Client(timeout=self._timeout)
         try:
             response = client.get(
                 url,
@@ -88,8 +92,14 @@ class UrlCalendarFetcher:
                     "Accept": "text/calendar, text/plain, */*",
                     "User-Agent": "uni-cockpit/0.1",
                 },
+                follow_redirects=False,
             )
+            if response.is_redirect:
+                logger.warning("calendar fetch redirected")
+                raise FeedFetchError
             response.raise_for_status()
+        except FeedFetchError:
+            raise
         except httpx.HTTPError:
             logger.warning("calendar fetch failed")
             raise FeedFetchError from None

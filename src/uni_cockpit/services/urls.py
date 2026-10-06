@@ -1,21 +1,25 @@
-"""Validate and mask calendar URLs. Masked text is safe to render."""
+"""Validate and mask calendar URLs. Masked text is safe to render.
+
+`allow_local` comes from `Settings.dev_allow_local_feeds`. Callers pass that
+value in; this module does not read the environment itself.
+"""
 
 from pathlib import Path
 from urllib.parse import SplitResult, parse_qsl, unquote, urlencode, urlsplit, urlunsplit
 
-from uni_cockpit.config import Settings
-
 _SECRET_KEYS = {"authtoken", "access_token", "token"}
+_LOCAL_HTTP_HOSTS = {"localhost", "127.0.0.1"}
 
 LOCAL_FEEDS_DISABLED_MESSAGE = (
-    "Lokale Pfade und file://-URLs sind deaktiviert. "
-    "Setze DEV_ALLOW_LOCAL_FEEDS=true nur für die lokale Entwicklung, "
-    "oder verwende eine https://-URL."
+    "Nur https://-URLs sind erlaubt. "
+    "http://, file:// und lokale Pfade sind nur mit DEV_ALLOW_LOCAL_FEEDS=true "
+    "für die lokale Entwicklung freigeschaltet."
 )
 
 _HTTPS_ONLY_MESSAGE = "Die Kalender-URL muss mit https:// beginnen."
 _HTTPS_OR_FIXTURE_MESSAGE = (
-    "Die Kalender-URL muss mit https:// beginnen (oder eine lokale file://-Fixture sein)."
+    "Die Kalender-URL muss mit https:// beginnen "
+    "(http:// nur auf localhost, oder eine lokale file://-Fixture)."
 )
 
 
@@ -24,24 +28,18 @@ class CalendarUrlError(Exception):
         super().__init__(message or _HTTPS_ONLY_MESSAGE)
 
 
-def local_feeds_allowed() -> bool:
-    """Process environment only, so tests can flip the flag without a `.env` file."""
-    return Settings(_env_file=None).dev_allow_local_feeds
-
-
-def validate_calendar_url(url: str, *, allow_local: bool | None = None) -> str:
-    allowed = local_feeds_allowed() if allow_local is None else allow_local
+def validate_calendar_url(url: str, *, allow_local: bool) -> str:
     candidate = url.strip()
     if not candidate:
-        raise CalendarUrlError(_invalid_url_message(allowed))
+        raise CalendarUrlError(_invalid_url_message(allow_local))
     parts = urlsplit(candidate)
-    if _is_remote_calendar_url(parts):
+    if parts.scheme == "https" and parts.netloc:
         return candidate
-    if _is_local_calendar_reference(candidate, parts):
-        if not allowed:
+    if _is_dev_feed(candidate, parts):
+        if not allow_local:
             raise CalendarUrlError(LOCAL_FEEDS_DISABLED_MESSAGE)
         return candidate
-    raise CalendarUrlError(_invalid_url_message(allowed))
+    raise CalendarUrlError(_invalid_url_message(allow_local))
 
 
 def _invalid_url_message(allow_local: bool) -> str:
@@ -50,20 +48,16 @@ def _invalid_url_message(allow_local: bool) -> str:
     return _HTTPS_ONLY_MESSAGE
 
 
-def _is_remote_calendar_url(parts: SplitResult) -> bool:
-    if parts.scheme == "https" and parts.netloc:
+def _is_dev_feed(candidate: str, parts: SplitResult) -> bool:
+    if _is_localhost_http(parts):
         return True
-    return (
-        parts.scheme == "http"
-        and parts.hostname in {"localhost", "127.0.0.1"}
-        and bool(parts.netloc)
-    )
-
-
-def _is_local_calendar_reference(candidate: str, parts: SplitResult) -> bool:
     if parts.scheme == "file":
         return bool(parts.path)
     return parts.scheme == "" and candidate.endswith(".ics")
+
+
+def _is_localhost_http(parts: SplitResult) -> bool:
+    return parts.scheme == "http" and parts.hostname in _LOCAL_HTTP_HOSTS and bool(parts.netloc)
 
 
 def mask_secret_url(url: str) -> str:

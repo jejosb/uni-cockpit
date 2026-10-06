@@ -20,8 +20,15 @@ from uni_cockpit.services.fetcher import FeedFetchError
 from uni_cockpit.services.importer import stored_relax_url
 
 
-def _client(tmp_path, url: str | None, *, payload: bytes | None = None, fail: bool = False):
-    application = create_app(make_settings(tmp_path, url))
+def _client(
+    tmp_path,
+    url: str | None,
+    *,
+    payload: bytes | None = None,
+    fail: bool = False,
+    allow_local: bool = True,
+):
+    application = create_app(make_settings(tmp_path, url, allow_local=allow_local))
     application.state.clock = FixedClock(FROZEN_NOW)
     if fail:
         application.state.fetcher = _FailingFetcher()
@@ -173,10 +180,9 @@ def _local_target(kind: str) -> str:
 
 
 @pytest.mark.parametrize("kind", ["file", "path"])
-def test_settings_rejects_local_feed_when_flag_off(tmp_path, monkeypatch, kind):
-    monkeypatch.setenv("DEV_ALLOW_LOCAL_FEEDS", "false")
+def test_settings_rejects_local_feed_when_flag_off(tmp_path, kind):
     submitted = _local_target(kind)
-    application = _client(tmp_path, None)
+    application = _client(tmp_path, None, allow_local=False)
     with TestClient(application) as client:
         response = client.post("/settings", data={"calendar_url": submitted})
         with Session(application.state.engine, expire_on_commit=False) as session:
@@ -189,10 +195,9 @@ def test_settings_rejects_local_feed_when_flag_off(tmp_path, monkeypatch, kind):
 
 
 @pytest.mark.parametrize("kind", ["file", "path"])
-def test_env_local_feed_rejected_when_flag_off(tmp_path, monkeypatch, kind):
-    monkeypatch.setenv("DEV_ALLOW_LOCAL_FEEDS", "false")
+def test_env_local_feed_rejected_when_flag_off(tmp_path, kind):
     submitted = _local_target(kind)
-    application = _client(tmp_path, submitted)
+    application = _client(tmp_path, submitted, allow_local=False)
     with TestClient(application) as client:
         response = client.get("/")
 
@@ -201,9 +206,42 @@ def test_env_local_feed_rejected_when_flag_off(tmp_path, monkeypatch, kind):
     assert "Lab report is due" not in response.text
 
 
-def test_https_settings_still_work_when_local_feeds_disabled(tmp_path, monkeypatch):
-    monkeypatch.setenv("DEV_ALLOW_LOCAL_FEEDS", "false")
-    application = _client(tmp_path, None, payload=read_fixture("relax_deadlines.ics"))
+@pytest.mark.parametrize(
+    "submitted",
+    ["http://127.0.0.1/calendar.ics", "http://localhost/calendar.ics"],
+)
+def test_settings_rejects_localhost_http_when_flag_off(tmp_path, submitted):
+    application = _client(tmp_path, None, allow_local=False)
+    with TestClient(application) as client:
+        response = client.post("/settings", data={"calendar_url": submitted})
+        with Session(application.state.engine, expire_on_commit=False) as session:
+            stored = stored_relax_url(session)
+
+    assert response.status_code == 400
+    assert "DEV_ALLOW_LOCAL_FEEDS" in response.text
+    assert "https://" in response.text
+    assert submitted not in response.text
+    assert stored is None
+
+
+def test_env_localhost_http_rejected_when_flag_off(tmp_path):
+    submitted = "http://127.0.0.1/calendar.ics"
+    application = _client(tmp_path, submitted, allow_local=False)
+    with TestClient(application) as client:
+        response = client.get("/")
+
+    assert "DEV_ALLOW_LOCAL_FEEDS" in response.text
+    assert submitted not in response.text
+    assert "Lab report is due" not in response.text
+
+
+def test_https_settings_still_work_when_local_feeds_disabled(tmp_path):
+    application = _client(
+        tmp_path,
+        None,
+        payload=read_fixture("relax_deadlines.ics"),
+        allow_local=False,
+    )
     with TestClient(application) as client:
         response = client.post(
             "/settings",

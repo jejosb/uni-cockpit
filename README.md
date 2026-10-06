@@ -46,7 +46,7 @@ cp .env.example .env
 
 Put the export URL in `.env` as `RELAX_ICAL_URL`. You can also leave that variable empty and paste the URL on the Kalender page. The page stores it in `data/cockpit.db`, which is git-ignored. When both are set, the environment variable wins.
 
-By default the app accepts only `https://` calendar URLs, plus `http://` on `localhost` or `127.0.0.1`. `file://` URLs and local `.ics` paths are rejected, on the settings page and when they come from `RELAX_ICAL_URL`. That keeps a deployed process from being pointed at arbitrary files on the server. Set `DEV_ALLOW_LOCAL_FEEDS=true` only on your own machine when you want to import a fixture. Leave it unset or `false` everywhere else.
+By default the app accepts only `https://` calendar URLs. `http://` (including `localhost` and `127.0.0.1`), `file://`, and local `.ics` paths are rejected, on the settings page and when they come from `RELAX_ICAL_URL`. That keeps a deployed process from reading local files or calling internal HTTP services. Set `DEV_ALLOW_LOCAL_FEEDS=true` only on your own machine when you want a fixture or `http://localhost`. Leave it unset or `false` everywhere else. Redirects are not followed; the RELAX export is used as given.
 
 `REMINDER_OFFSETS_HOURS` defaults to `72,24`. Nothing reads it yet. The next story will use it for Telegram reminders. `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` stay empty until then.
 

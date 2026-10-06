@@ -35,12 +35,6 @@ def _redacting_logs():
     configure_logging()
 
 
-@pytest.fixture(autouse=True)
-def _allow_local_feeds(monkeypatch):
-    """Tests load anonymized fixtures via file://. Production leaves the flag off."""
-    monkeypatch.setenv("DEV_ALLOW_LOCAL_FEEDS", "true")
-
-
 @pytest.fixture
 def engine(tmp_path):
     database_url = f"sqlite:///{tmp_path / 'cockpit.db'}"
@@ -55,8 +49,15 @@ def session(engine):
         yield db_session
 
 
-def make_settings(tmp_path, url: str | None) -> Settings:
+def make_settings(tmp_path, url: str | None, *, allow_local: bool = True) -> Settings:
+    """Test apps load fixtures via file://, so the dev flag defaults to on.
+
+    Pass `allow_local=False` to exercise the production policy. The value is
+    explicit Settings state, not an environment fallback.
+    """
     return Settings(
         relax_ical_url=url,
         database_url=f"sqlite:///{tmp_path / 'cockpit.db'}",
+        dev_allow_local_feeds=allow_local,
+        _env_file=None,
     )

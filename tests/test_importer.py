@@ -20,8 +20,14 @@ def test_import_from_relax_ical_url_stores_title_course_utc_due_and_uid(session,
     settings = Settings(
         relax_ical_url=FIXTURES.joinpath("relax_deadlines.ics").resolve().as_uri(),
         database_url=f"sqlite:///{tmp_path / 'unused.db'}",
+        dev_allow_local_feeds=True,
+        _env_file=None,
     )
-    result = import_from_configured_url(session, settings, UrlCalendarFetcher())
+    result = import_from_configured_url(
+        session,
+        settings,
+        UrlCalendarFetcher(allow_local=settings.dev_allow_local_feeds),
+    )
 
     assert result.created == 7
     assert result.skipped == 2
