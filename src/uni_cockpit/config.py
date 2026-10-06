@@ -18,6 +18,8 @@ class Settings(BaseSettings):
 
     relax_ical_url: str | None = Field(default=None, repr=False)
     database_url: str = "sqlite:///data/cockpit.db"
+    # Off unless a developer opts in. A deployed server must not read local files.
+    dev_allow_local_feeds: bool = False
     reminder_offsets_hours: str = "72,24"
     telegram_bot_token: str | None = Field(default=None, repr=False)
     telegram_chat_id: str | None = Field(default=None, repr=False)
