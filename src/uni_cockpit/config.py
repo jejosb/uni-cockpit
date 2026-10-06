@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     )
 
     relax_ical_url: str | None = Field(default=None, repr=False)
+    hisinone_ical_url: str | None = Field(default=None, repr=False)
     database_url: str = "sqlite:///data/cockpit.db"
     # Off unless a developer opts in. A deployed server must not read local files.
     dev_allow_local_feeds: bool = False
@@ -32,4 +33,12 @@ class Settings(BaseSettings):
         if self.relax_ical_url is None:
             return None
         stripped = self.relax_ical_url.strip()
+        return stripped or None
+
+    @property
+    def hisinone_url(self) -> str | None:
+        """`HISINONE_ICAL_URL`. Empty means the settings page is the fallback."""
+        if self.hisinone_ical_url is None:
+            return None
+        stripped = self.hisinone_ical_url.strip()
         return stripped or None

@@ -16,6 +16,8 @@ class ParsedEvent:
     all_day: bool
     recurrence_rule: str | None
     exception_dates: tuple[datetime, ...]
+    recurrence_id: datetime | None = None
+    start_zone: str = "Europe/Berlin"
 
 
 @dataclass(frozen=True)

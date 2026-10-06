@@ -1,0 +1,16 @@
+<ol class="lectures">
+  {% for item in lectures %}
+    <li class="lecture">
+      <div class="lecture-body">
+        {% if item.course %}
+          <p class="course">{{ item.course }}</p>
+        {% endif %}
+        <h3>{{ item.title }}</h3>
+        <p class="due"><time datetime="{{ item.starts_utc }}">{{ item.time_label }}</time></p>
+      </div>
+      {% if item.room %}
+        <p class="room">{{ item.room }}</p>
+      {% endif %}
+    </li>
+  {% endfor %}
+</ol>

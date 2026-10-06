@@ -24,6 +24,22 @@ def to_berlin(value: datetime) -> datetime:
     return ensure_utc(value).astimezone(BERLIN)
 
 
+def format_berlin_day(value: datetime) -> str:
+    local = to_berlin(value)
+    weekday = _WEEKDAYS[local.weekday()]
+    return f"{weekday}, {local:%d.%m.%Y}"
+
+
+def format_clock_range(start: datetime, end: datetime | None) -> str:
+    """Berlin wall-clock range, such as ``10:15–11:45 CET``."""
+    local = to_berlin(start)
+    zone = local.tzname() or "Europe/Berlin"
+    if end is None:
+        return f"{local:%H:%M} {zone}"
+    end_local = to_berlin(end)
+    return f"{local:%H:%M}–{end_local:%H:%M} {zone}"
+
+
 def format_due_local(value: datetime) -> str:
     local = to_berlin(value)
     weekday = _WEEKDAYS[local.weekday()]

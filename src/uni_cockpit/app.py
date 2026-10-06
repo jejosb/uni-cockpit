@@ -18,15 +18,25 @@ from uni_cockpit.services.fetcher import UrlCalendarFetcher
 from uni_cockpit.services.importer import (
     CalendarImportError,
     effective_calendar_url,
+    effective_hisinone_url,
     format_import_notice,
+    format_timetable_notice,
     import_from_configured_url,
+    import_timetable_from_configured_url,
     save_calendar_url,
+    save_hisinone_url,
 )
 from uni_cockpit.services.reminders import (
     Clock,
     ReminderScheduler,
     build_reminder_scheduler,
     parse_reminder_offsets,
+)
+from uni_cockpit.services.timetable import (
+    STALE_NOTICE,
+    timetable_feed_is_stale,
+    today_lecture_views,
+    week_page,
 )
 from uni_cockpit.services.urls import CalendarUrlError, mask_secret_url, validate_calendar_url
 from uni_cockpit.timeutil import SystemClock
@@ -78,6 +88,10 @@ def create_app(
                     else:
                         app.state.import_notice = format_import_notice(result)
                 _reschedule_reminders(app, session)
+            if app.state.settings.hisinone_url:
+                error, notice = _import_timetable(app)
+                app.state.timetable_error = error
+                app.state.timetable_notice = notice
             yield
         finally:
             await app.state.reminders.stop()
@@ -93,6 +107,8 @@ def create_app(
     app.state.reminder_offsets = offsets
     app.state.import_error = None
     app.state.import_notice = None
+    app.state.timetable_error = None
+    app.state.timetable_notice = None
     app.state.templates = Jinja2Templates(directory=str(TEMPLATES))
     app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
 
@@ -137,6 +153,40 @@ def create_app(
         _store_flash(request, None, notice)
         return RedirectResponse("/", status_code=303)
 
+    @app.get("/stundenplan", response_class=HTMLResponse)
+    def timetable(request: Request, week: str | None = None) -> HTMLResponse:
+        return _render_timetable(request, week=week)
+
+    @app.post("/stundenplan/import")
+    def import_timetable(request: Request, week: str = Form("")):
+        error, notice = _import_timetable(request.app)
+        if error:
+            return _render_timetable(request, error=error, notice=notice, week=week or None)
+        _store_timetable_flash(request, None, notice)
+        return RedirectResponse(_timetable_target(week), status_code=303)
+
+    @app.post("/settings/timetable")
+    def save_timetable_settings(request: Request, hisinone_url: str = Form("")):
+        try:
+            url = _validated_calendar_url(hisinone_url, request.app.state.settings)
+        except CalendarUrlError as exc:
+            return _render_settings(request, error=str(exc), status_code=400)
+        with Session(request.app.state.engine, expire_on_commit=False) as session:
+            save_hisinone_url(session, url)
+        if request.app.state.settings.hisinone_url:
+            return _render_settings(
+                request,
+                notice=(
+                    "Die URL ist lokal gespeichert. Für den Import gilt weiter "
+                    "HISINONE_ICAL_URL aus der Umgebung."
+                ),
+            )
+        error, notice = _import_timetable(request.app)
+        if error:
+            return _render_timetable(request, error=error, notice=notice)
+        _store_timetable_flash(request, None, notice)
+        return RedirectResponse("/stundenplan", status_code=303)
+
     return app
 
 
@@ -150,6 +200,36 @@ def _import_now(request: Request) -> tuple[str | None, str | None]:
             return str(exc), None
         _reschedule_reminders(request.app, session)
         return None, format_import_notice(result)
+
+
+def _validated_calendar_url(url: str, settings: Settings) -> str:
+    """Validate like the RELAX form, including the host allowlist when Settings has one."""
+    kwargs: dict[str, object] = {"allow_local": settings.dev_allow_local_feeds}
+    hosts = getattr(settings, "feed_allowed_hosts", None)
+    if hosts is not None:
+        kwargs["allowed_hosts"] = hosts
+    return validate_calendar_url(url, **kwargs)
+
+
+def _import_timetable(app: FastAPI) -> tuple[str | None, str | None]:
+    """Import the HISinOne feed with `app.state.fetcher` (the shared calendar fetcher)."""
+    with Session(app.state.engine, expire_on_commit=False) as session:
+        try:
+            result = import_timetable_from_configured_url(
+                session,
+                app.state.settings,
+                app.state.fetcher,
+                now=app.state.clock.now(),
+            )
+        except CalendarImportError as exc:
+            return str(exc), None
+        return None, format_timetable_notice(result)
+
+
+def _timetable_target(week: str) -> str:
+    if len(week) == 10 and week[4] == "-" and week[7] == "-" and week.replace("-", "").isdigit():
+        return f"/stundenplan?week={week}"
+    return "/stundenplan"
 
 
 def _reschedule_reminders(app: FastAPI, session: Session) -> None:
@@ -171,14 +251,20 @@ def _consume_flash(request: Request) -> tuple[str | None, str | None]:
 
 
 def _page_context(request: Request, error: str | None, notice: str | None) -> dict[str, object]:
+    now = request.app.state.clock.now()
     with Session(request.app.state.engine, expire_on_commit=False) as session:
-        deadlines = deadline_views(session, request.app.state.clock.now())
+        deadlines = deadline_views(session, now)
         has_url = effective_calendar_url(session, request.app.state.settings) is not None
+        today = today_lecture_views(session, now)
+        stale = timetable_feed_is_stale(session)
     return {
         "deadlines": deadlines,
         "error": error,
         "notice": notice,
         "has_url": has_url,
+        "today_lectures": today,
+        "timetable_stale": stale,
+        "timetable_stale_notice": STALE_NOTICE,
     }
 
 
@@ -208,6 +294,46 @@ def _render_partial(request: Request, *, error: str | None, notice: str | None) 
     )
 
 
+def _render_timetable(
+    request: Request,
+    *,
+    error: str | None = None,
+    notice: str | None = None,
+    week: str | None = None,
+    status_code: int = 200,
+) -> HTMLResponse:
+    if error is None and notice is None:
+        error, notice = _consume_timetable_flash(request)
+    now = request.app.state.clock.now()
+    with Session(request.app.state.engine, expire_on_commit=False) as session:
+        has_url = effective_hisinone_url(session, request.app.state.settings) is not None
+        page = week_page(session, now, week, has_url=has_url)
+    return request.app.state.templates.TemplateResponse(
+        request,
+        "timetable.html",
+        {
+            "error": error,
+            "notice": notice,
+            "page": page,
+            "timetable_stale_notice": STALE_NOTICE,
+        },
+        status_code=status_code,
+    )
+
+
+def _store_timetable_flash(request: Request, error: str | None, notice: str | None) -> None:
+    request.app.state.timetable_error = error
+    request.app.state.timetable_notice = notice
+
+
+def _consume_timetable_flash(request: Request) -> tuple[str | None, str | None]:
+    error = request.app.state.timetable_error
+    notice = request.app.state.timetable_notice
+    request.app.state.timetable_error = None
+    request.app.state.timetable_notice = None
+    return error, notice
+
+
 def _render_settings(
     request: Request,
     *,
@@ -218,6 +344,7 @@ def _render_settings(
     settings: Settings = request.app.state.settings
     with Session(request.app.state.engine, expire_on_commit=False) as session:
         active = effective_calendar_url(session, settings)
+        hisinone = effective_hisinone_url(session, settings)
     return request.app.state.templates.TemplateResponse(
         request,
         "settings.html",
@@ -226,6 +353,8 @@ def _render_settings(
             "notice": notice,
             "masked_url": mask_secret_url(active) if active else None,
             "env_configured": settings.relax_url is not None,
+            "masked_hisinone_url": mask_secret_url(hisinone) if hisinone else None,
+            "hisinone_env_configured": settings.hisinone_url is not None,
         },
         status_code=status_code,
     )

@@ -45,6 +45,27 @@ def init_db(engine: Engine) -> None:
 
     FeedSource.metadata.create_all(engine)
     CalendarEvent.metadata.create_all(engine)
+    _ensure_feed_source_columns(engine)
+
+
+def _ensure_feed_source_columns(engine: Engine) -> None:
+    """Add columns that `create_all` does not attach to an existing SQLite file."""
+    if engine.dialect.name != "sqlite":
+        return
+    with engine.begin() as connection:
+        tables = {
+            row[0]
+            for row in connection.exec_driver_sql(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        if "feed_sources" not in tables:
+            return
+        columns = {row[1] for row in connection.exec_driver_sql("PRAGMA table_info(feed_sources)")}
+        if "timetable_stale" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE feed_sources ADD COLUMN timetable_stale BOOLEAN NOT NULL DEFAULT 0"
+            )
 
 
 def _ensure_sqlite_directory(database_url: str) -> None:

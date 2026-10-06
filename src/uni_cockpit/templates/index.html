@@ -10,6 +10,22 @@
       <button type="submit">Jetzt aktualisieren</button>
     </form>
   </section>
+  {% if today_lectures or timetable_stale %}
+    <section class="today-lectures" aria-labelledby="today-heading">
+      <div class="page-head">
+        <h2 id="today-heading">Heute im Stundenplan</h2>
+        <a class="text-link" href="/stundenplan">Zur Woche</a>
+      </div>
+      {% if timetable_stale %}
+        <p class="banner banner-notice" role="status">{{ timetable_stale_notice }}</p>
+      {% endif %}
+      {% if today_lectures %}
+        {% with lectures=today_lectures %}
+          {% include "partials/lectures.html" %}
+        {% endwith %}
+      {% endif %}
+    </section>
+  {% endif %}
   <div id="cockpit">
     {% include "partials/cockpit.html" %}
   </div>

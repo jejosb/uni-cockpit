@@ -26,6 +26,8 @@ class FeedSource(SQLModel, table=True):
     last_imported_at: datetime | None = Field(
         default=None, sa_column=Column(UtcDateTime(), nullable=True)
     )
+    # Set when the last successful HISinOne import had no upcoming lectures.
+    timetable_stale: bool = Field(default=False)
 
 
 class CalendarEvent(SQLModel, table=True):
