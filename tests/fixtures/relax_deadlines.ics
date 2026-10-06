@@ -1,0 +1,74 @@
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//uni-cockpit//anonymized fixture//EN
+CALSCALE:GREGORIAN
+METHOD:PUBLISH
+X-WR-CALNAME:Demo Student
+BEGIN:VEVENT
+UID:evt-expired@calendar.example.edu
+SUMMARY:Expired worksheet is due
+DESCRIPTION:Anonymized past assignment.
+CATEGORIES:ALG
+DTSTAMP:20261001T080000Z
+DTSTART:20261005T120000Z
+END:VEVENT
+BEGIN:VEVENT
+UID:evt-soon@calendar.example.edu
+SUMMARY:Problem sheet is due
+DESCRIPTION:Weekly sheet for the algorithms course.
+CATEGORIES:ALG
+DTSTAMP:20261001T080000Z
+DTSTART:20261007T080000Z
+END:VEVENT
+BEGIN:VEVENT
+UID:evt-lab@calendar.example.edu
+SUMMARY:Lab report is due
+DESCRIPTION:Submit the lab report as PDF.
+CATEGORIES:DBSYS
+DTSTAMP:20261001T080000Z
+DTSTART:20261008T160000Z
+END:VEVENT
+BEGIN:VEVENT
+SUMMARY:Broken entry without uid
+DESCRIPTION:This VEVENT is incomplete on purpose.
+DTSTAMP:20261001T080000Z
+DTSTART:20261011T100000Z
+END:VEVENT
+BEGIN:VEVENT
+UID:evt-essay@calendar.example.edu
+SUMMARY:Essay draft is due
+DESCRIPTION:Draft for the seminar.
+CATEGORIES:HCI
+DTSTAMP:20261001T080000Z
+DTSTART:20261012T090000Z
+END:VEVENT
+BEGIN:VEVENT
+UID:evt-no-course@calendar.example.edu
+SUMMARY:Reading notes are due
+DESCRIPTION:Notes without a course category. This line is folded in the
+  fixture so wrapping stays realistic.
+DTSTAMP:20261001T080000Z
+DTSTART:20261015T090000Z
+END:VEVENT
+BEGIN:VEVENT
+UID:evt-seminar@calendar.example.edu
+SUMMARY:Seminar paper is due
+DESCRIPTION:Bitte die Gliederung abgeben.\nKurs: Wissenschaftliches Arbeiten
+DTSTAMP:20261001T080000Z
+DTSTART:20261020T140000Z
+END:VEVENT
+BEGIN:VEVENT
+UID:evt-after-dst@calendar.example.edu
+SUMMARY:Quiz after the clock change
+DESCRIPTION:Timed after the Europe/Berlin switch on 25 Oct 2026.
+CATEGORIES:NETZ
+DTSTAMP:20261001T080000Z
+DTSTART:20261026T110000Z
+END:VEVENT
+BEGIN:VEVENT
+UID:evt-missing-start@calendar.example.edu
+SUMMARY:Broken entry without start
+DESCRIPTION:UID and summary are present\, DTSTART is not.
+DTSTAMP:20261001T080000Z
+END:VEVENT
+END:VCALENDAR

@@ -1,0 +1,205 @@
+:root {
+  color-scheme: light;
+  --ink: #1d1914;
+  --muted: #5c564c;
+  --paper: #f3efe6;
+  --card: #fffdf8;
+  --line: #e4dccb;
+  --green: #0f5c45;
+  --green-deep: #0b3d2e;
+  --soon-bg: #fff1e4;
+  --soon: #9a3412;
+  --danger-bg: #fde8e4;
+  --danger: #9f1239;
+  --notice-bg: #e7f3ee;
+  --shadow: 0 16px 40px rgba(55, 42, 24, 0.06);
+  font-family: "Avenir Next", "Segoe UI", sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at top left, rgba(15, 92, 69, 0.08), transparent 32rem),
+    var(--paper);
+  color: var(--ink);
+}
+
+.site-header,
+.site-footer,
+main {
+  width: min(880px, calc(100% - 2rem));
+  margin-inline: auto;
+}
+
+.site-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: end;
+  gap: 1rem;
+  padding: 1.5rem 0 1rem;
+}
+
+.eyebrow {
+  margin: 0;
+  color: var(--green);
+  font-size: 0.78rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.wordmark {
+  color: inherit;
+  font-family: Palatino, "Palatino Linotype", "Iowan Old Style", Georgia, serif;
+  font-size: 2rem;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+nav {
+  display: flex;
+  gap: 0.75rem;
+}
+
+nav a {
+  color: var(--ink);
+  text-decoration: none;
+  padding-bottom: 0.15rem;
+  border-bottom: 2px solid transparent;
+}
+
+nav a[aria-current="page"] { border-bottom-color: var(--green); }
+
+main { padding-bottom: 3rem; }
+
+.page-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: end;
+  gap: 1rem;
+  margin: 0.5rem 0 1.25rem;
+}
+
+h1, h2 { font-family: Palatino, "Palatino Linotype", Georgia, serif; font-weight: 600; }
+
+h1 { margin: 0; font-size: 2.4rem; line-height: 1; }
+
+h2 { margin: 0; font-size: 1.25rem; }
+
+.lede, .course, .due, .hint, .stored, .site-footer p { color: var(--muted); }
+
+.lede { margin: 0.4rem 0 0; max-width: 38rem; }
+
+button, .text-link {
+  background: var(--green);
+  color: white;
+  border: 0;
+  border-radius: 999px;
+  padding: 0.7rem 1rem;
+  font: inherit;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+button:hover, .text-link:hover { background: var(--green-deep); }
+
+.banner {
+  margin: 0 0 1rem;
+  padding: 0.8rem 1rem;
+  border-radius: 12px;
+}
+
+.banner-error { background: var(--danger-bg); color: var(--danger); }
+.banner-notice { background: var(--notice-bg); color: var(--green-deep); }
+
+.deadlines {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.75rem;
+}
+
+.deadline {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1.1rem;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  box-shadow: var(--shadow);
+}
+
+.deadline--soon {
+  background: var(--soon-bg);
+  border-color: #f0c2a4;
+  box-shadow: inset 5px 0 0 var(--soon);
+}
+
+.course {
+  margin: 0 0 0.2rem;
+  font-size: 0.78rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.due, .remaining { margin: 0.35rem 0 0; }
+
+.remaining {
+  color: var(--ink);
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+
+.deadline-meta { text-align: right; }
+
+.badge {
+  display: inline-block;
+  margin: 0;
+  padding: 0.2rem 0.55rem;
+  border-radius: 999px;
+  background: var(--soon);
+  color: white;
+  font-size: 0.75rem;
+  letter-spacing: 0.02em;
+}
+
+.empty-state, .panel {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  padding: 1.25rem 1.3rem;
+  box-shadow: var(--shadow);
+}
+
+.empty-state h2, .panel h2 { margin-bottom: 0.4rem; }
+
+.steps { margin: 0.5rem 0 1rem; padding-left: 1.2rem; color: var(--ink); }
+
+label { display: block; margin-bottom: 0.35rem; font-weight: 600; }
+
+input[type="url"] {
+  width: 100%;
+  margin-bottom: 0.8rem;
+  padding: 0.75rem 0.8rem;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fff;
+  font: inherit;
+  color: var(--ink);
+}
+
+.stored code, .hint code, .panel code { font-size: 0.92rem; }
+
+.site-footer { padding-bottom: 2rem; }
+
+@media (max-width: 680px) {
+  .site-header, .page-head, .deadline { display: block; }
+  .deadline-meta { text-align: left; margin-top: 0.7rem; }
+  nav { margin-top: 0.8rem; }
+  h1 { font-size: 2rem; }
+  .page-head button { margin-top: 0.8rem; }
+}
