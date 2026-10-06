@@ -1,1 +1,1 @@
-"""Application services for fetching, importing, and listing deadlines."""
+"""Application services for fetching, importing, listing deadlines, and reminders."""

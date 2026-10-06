@@ -1,6 +1,7 @@
 """Server-rendered cockpit. HTMX refreshes the deadline list in place."""
 
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import FastAPI, Form, Request
@@ -21,6 +22,12 @@ from uni_cockpit.services.importer import (
     import_from_configured_url,
     save_calendar_url,
 )
+from uni_cockpit.services.reminders import (
+    Clock,
+    ReminderScheduler,
+    build_reminder_scheduler,
+    parse_reminder_offsets,
+)
 from uni_cockpit.services.urls import CalendarUrlError, mask_secret_url, validate_calendar_url
 from uni_cockpit.timeutil import SystemClock
 
@@ -29,25 +36,51 @@ TEMPLATES = PACKAGE_DIR / "templates"
 STATIC = PACKAGE_DIR / "static"
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+class _StateClock:
+    """Reads whatever clock is currently stored on ``app.state``.
+
+    Scheduling passes ``app.state.clock.now()`` in, and delivery calls this
+    same view, so replacing ``app.state.clock`` cannot leave two clocks behind.
+    """
+
+    def __init__(self, app: FastAPI) -> None:
+        self._app = app
+
+    def now(self) -> datetime:
+        return self._app.state.clock.now()
+
+
+def create_app(
+    settings: Settings | None = None,
+    *,
+    reminders: ReminderScheduler | None = None,
+    clock: Clock | None = None,
+) -> FastAPI:
     configure_logging()
     settings = settings or Settings()
     engine = create_db_engine(settings.database_url)
     init_db(engine)
+    clock = clock or SystemClock()
+    offsets = parse_reminder_offsets(settings.reminder_offsets_hours)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        if app.state.settings.relax_url:
+        await app.state.reminders.start()
+        try:
             with Session(app.state.engine, expire_on_commit=False) as session:
-                try:
-                    result = import_from_configured_url(
-                        session, app.state.settings, app.state.fetcher
-                    )
-                except CalendarImportError as exc:
-                    app.state.import_error = str(exc)
-                else:
-                    app.state.import_notice = format_import_notice(result)
-        yield
+                if app.state.settings.relax_url:
+                    try:
+                        result = import_from_configured_url(
+                            session, app.state.settings, app.state.fetcher
+                        )
+                    except CalendarImportError as exc:
+                        app.state.import_error = str(exc)
+                    else:
+                        app.state.import_notice = format_import_notice(result)
+                _reschedule_reminders(app, session)
+            yield
+        finally:
+            await app.state.reminders.stop()
 
     app = FastAPI(title="uni-cockpit", lifespan=lifespan)
     app.state.settings = settings
@@ -56,7 +89,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_local=settings.dev_allow_local_feeds,
         allowed_hosts=settings.feed_allowed_hosts,
     )
-    app.state.clock = SystemClock()
+    app.state.clock = clock
+    if reminders is None:
+        reminders = build_reminder_scheduler(settings, engine, _StateClock(app), offsets)
+    app.state.reminders = reminders
+    app.state.reminder_offsets = offsets
     app.state.import_error = None
     app.state.import_notice = None
     app.state.templates = Jinja2Templates(directory=str(TEMPLATES))
@@ -115,7 +152,13 @@ def _import_now(request: Request) -> tuple[str | None, str | None]:
             )
         except CalendarImportError as exc:
             return str(exc), None
+        _reschedule_reminders(request.app, session)
         return None, format_import_notice(result)
+
+
+def _reschedule_reminders(app: FastAPI, session: Session) -> None:
+    """Hook for imports. Story 4 can call ``app.state.reminders.reschedule`` too."""
+    app.state.reminders.reschedule(session, now=app.state.clock.now())
 
 
 def _store_flash(request: Request, error: str | None, notice: str | None) -> None:

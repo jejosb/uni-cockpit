@@ -55,12 +55,17 @@ def make_settings(
     *,
     allow_local: bool = True,
     allowed_hosts: str | None = None,
+    reminder_offsets_hours: str = "72,24",
+    telegram_bot_token: str | None = None,
+    telegram_chat_id: str | None = None,
 ) -> Settings:
     """Test apps load fixtures via file://, so the dev flag defaults to on.
 
     Pass `allow_local=False` to exercise the production policy. The value is
     explicit Settings state, not an environment fallback. `allowed_hosts`
     overrides `FEED_ALLOWED_HOSTS`; omitted, the production default is used.
+    Reminder offsets and Telegram credentials are explicit too, so a developer
+    environment cannot leak into the tests.
     """
     hosts = "relax.reutlingen-university.de" if allowed_hosts is None else allowed_hosts
     return Settings(
@@ -68,5 +73,8 @@ def make_settings(
         database_url=f"sqlite:///{tmp_path / 'cockpit.db'}",
         dev_allow_local_feeds=allow_local,
         feed_allowed_hosts=hosts,
+        reminder_offsets_hours=reminder_offsets_hours,
+        telegram_bot_token=telegram_bot_token,
+        telegram_chat_id=telegram_chat_id,
         _env_file=None,
     )
