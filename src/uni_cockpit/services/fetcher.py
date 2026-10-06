@@ -1,7 +1,9 @@
-"""Load a calendar feed from HTTPS or a local fixture path.
+"""Load a calendar feed from HTTPS or, in development, a local fixture path.
 
 The feed URL is never written to the log. Callers turn failures into a fixed
-message that also omits the URL.
+message that also omits the URL. `file://` and filesystem paths are refused
+unless `DEV_ALLOW_LOCAL_FEEDS` is on, so a deployed server cannot be pointed
+at arbitrary local files.
 """
 
 import logging
@@ -11,20 +13,29 @@ from urllib.parse import unquote, urlsplit
 import httpx
 
 from uni_cockpit.logging_config import configure_logging
+from uni_cockpit.services.urls import LOCAL_FEEDS_DISABLED_MESSAGE, local_feeds_allowed
 
 logger = logging.getLogger(__name__)
 
 _MAX_BYTES = 2_000_000
+_FETCH_FAILED_MESSAGE = (
+    "Der Kalender konnte nicht geladen werden. "
+    "Prüfe die URL und die Verbindung. Bereits importierte Fristen bleiben erhalten."
+)
 
 
 class FeedFetchError(Exception):
     """The feed could not be read. The message is safe to show."""
 
+    def __init__(self, message: str | None = None) -> None:
+        super().__init__(message or _FETCH_FAILED_MESSAGE)
+
+
+class LocalFeedDisabledError(FeedFetchError):
+    """A local path was refused because the development flag is off."""
+
     def __init__(self) -> None:
-        super().__init__(
-            "Der Kalender konnte nicht geladen werden. "
-            "Prüfe die URL und die Verbindung. Bereits importierte Fristen bleiben erhalten."
-        )
+        super().__init__(LOCAL_FEEDS_DISABLED_MESSAGE)
 
 
 class UrlCalendarFetcher:
@@ -33,20 +44,30 @@ class UrlCalendarFetcher:
         client: httpx.Client | None = None,
         timeout: float = 20.0,
         max_bytes: int = _MAX_BYTES,
+        allow_local: bool | None = None,
     ) -> None:
         self._client = client
         self._timeout = timeout
         self._max_bytes = max_bytes
+        self._allow_local = allow_local
 
     def fetch(self, url: str) -> bytes:
         configure_logging()
         parts = urlsplit(url)
         if parts.scheme in {"", "file"}:
+            if not self._local_allowed():
+                logger.warning("local calendar feed rejected")
+                raise LocalFeedDisabledError
             return self._read_file(url)
         if parts.scheme == "https" or _localhost_http(parts.hostname, parts.scheme):
             return self._read_http(url)
         logger.warning("calendar url scheme is not allowed")
         raise FeedFetchError
+
+    def _local_allowed(self) -> bool:
+        if self._allow_local is not None:
+            return self._allow_local
+        return local_feeds_allowed()
 
     def _read_file(self, url: str) -> bytes:
         path = _file_path(url)

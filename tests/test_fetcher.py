@@ -1,10 +1,11 @@
 import logging
 
 import httpx
+import pytest
 
 from tests.conftest import FIXTURES, SECRET_TOKEN, SECRET_URL, read_fixture
 from uni_cockpit.logging_config import configure_logging
-from uni_cockpit.services.fetcher import FeedFetchError, UrlCalendarFetcher
+from uni_cockpit.services.fetcher import FeedFetchError, LocalFeedDisabledError, UrlCalendarFetcher
 
 
 def test_http_fetch_does_not_log_the_calendar_url(caplog):
@@ -57,6 +58,35 @@ def test_redaction_filter_scrubs_logged_tokens(caplog):
 
 
 def test_file_fixture_loads_without_network():
-    fixture = FIXTURES.joinpath("relax_deadlines.ics").resolve().as_uri()
-    payload = UrlCalendarFetcher().fetch(fixture)
-    assert b"evt-lab@calendar.example.edu" in payload
+    fixture = FIXTURES.joinpath("relax_deadlines.ics").resolve()
+    by_uri = UrlCalendarFetcher().fetch(fixture.as_uri())
+    by_path = UrlCalendarFetcher().fetch(str(fixture))
+    assert b"evt-lab@calendar.example.edu" in by_uri
+    assert b"evt-lab@calendar.example.edu" in by_path
+
+
+def test_https_fetch_still_allowed_when_local_feeds_disabled(monkeypatch):
+    monkeypatch.setenv("DEV_ALLOW_LOCAL_FEEDS", "false")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=read_fixture("empty_calendar.ics"))
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    payload = UrlCalendarFetcher(client=client).fetch(SECRET_URL)
+    client.close()
+    assert payload.startswith(b"BEGIN:VCALENDAR")
+
+
+@pytest.mark.parametrize("kind", ["file", "path"])
+def test_local_feed_rejected_when_flag_off(monkeypatch, caplog, kind):
+    monkeypatch.setenv("DEV_ALLOW_LOCAL_FEEDS", "false")
+    fixture = FIXTURES.joinpath("relax_deadlines.ics").resolve()
+    target = fixture.as_uri() if kind == "file" else str(fixture)
+    configure_logging()
+    with caplog.at_level(logging.DEBUG), pytest.raises(LocalFeedDisabledError) as exc:
+        UrlCalendarFetcher().fetch(target)
+
+    message = str(exc.value)
+    assert "DEV_ALLOW_LOCAL_FEEDS" in message
+    assert target not in message
+    assert target not in caplog.text

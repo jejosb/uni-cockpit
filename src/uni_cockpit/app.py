@@ -52,7 +52,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="uni-cockpit", lifespan=lifespan)
     app.state.settings = settings
     app.state.engine = engine
-    app.state.fetcher = UrlCalendarFetcher()
+    app.state.fetcher = UrlCalendarFetcher(allow_local=settings.dev_allow_local_feeds)
     app.state.clock = SystemClock()
     app.state.import_error = None
     app.state.import_notice = None
@@ -78,7 +78,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/settings")
     def save_settings(request: Request, calendar_url: str = Form("")):
         try:
-            url = validate_calendar_url(calendar_url)
+            url = validate_calendar_url(
+                calendar_url,
+                allow_local=request.app.state.settings.dev_allow_local_feeds,
+            )
         except CalendarUrlError as exc:
             return _render_settings(request, error=str(exc), status_code=400)
         with Session(request.app.state.engine, expire_on_commit=False) as session:

@@ -35,6 +35,12 @@ def _redacting_logs():
     configure_logging()
 
 
+@pytest.fixture(autouse=True)
+def _allow_local_feeds(monkeypatch):
+    """Tests load anonymized fixtures via file://. Production leaves the flag off."""
+    monkeypatch.setenv("DEV_ALLOW_LOCAL_FEEDS", "true")
+
+
 @pytest.fixture
 def engine(tmp_path):
     database_url = f"sqlite:///{tmp_path / 'cockpit.db'}"
