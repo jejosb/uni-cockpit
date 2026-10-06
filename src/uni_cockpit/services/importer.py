@@ -12,6 +12,7 @@ so reminder jobs follow the new rows.
 """
 
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -94,12 +95,14 @@ def import_from_configured_url(
     except LocalFeedDisabledError as exc:
         logger.warning("calendar import rejected a local feed")
         error = CalendarImportError("local", str(exc))
-        _record_sync(session, "relax", status="error", message=str(error), now=_moment(now))
+        record_sync_status(
+            session, source="relax", status="error", message=str(error), now=_moment(now)
+        )
         raise error from None
     except FeedFetchError:
         logger.warning("calendar import failed because the feed could not be loaded")
-        _record_sync(
-            session, "relax", status="error", message=LOAD_FAILED_MESSAGE, now=_moment(now)
+        record_sync_status(
+            session, source="relax", status="error", message=LOAD_FAILED_MESSAGE, now=_moment(now)
         )
         raise load_failed_error() from None
     return import_payload(session, payload, now=now)
@@ -118,9 +121,9 @@ def import_payload(
         parsed = parse_icalendar(payload)
     except CalendarParseError:
         logger.warning("calendar import failed because the feed was not valid iCalendar")
-        _record_sync(
+        record_sync_status(
             session,
-            adapter.source_key,
+            source=adapter.source_key,
             status="error",
             message=PARSE_FAILED_MESSAGE,
             now=moment,
@@ -131,9 +134,9 @@ def import_payload(
         session, adapter.source_key, moment
     ):
         logger.warning("calendar feed contained no deadlines; existing open deadlines were kept")
-        _record_sync(
+        record_sync_status(
             session,
-            adapter.source_key,
+            source=adapter.source_key,
             status="empty",
             message=EMPTY_FEED_MESSAGE,
             now=moment,
@@ -145,17 +148,17 @@ def import_payload(
             skipped=len(parsed.skipped),
             preserved=True,
         )
-    created, updated, removed = _upsert(
+    result = upsert_events(
         session,
-        adapter.source_key,
         drafts,
-        skipped_uids=set(parsed.skipped_uids),
+        source=adapter.source_key,
+        skipped_uids=parsed.skipped_uids,
         now=moment,
     )
     return ImportResult(
-        created=created,
-        updated=updated,
-        removed=removed,
+        created=result.created,
+        updated=result.updated,
+        removed=result.removed,
         skipped=len(parsed.skipped),
     )
 
@@ -198,6 +201,38 @@ def get_or_create_source(session: Session, *, key: str, title: str) -> FeedSourc
     session.commit()
     session.refresh(source)
     return source
+
+
+def upsert_events(
+    session: Session,
+    drafts: list[EventDraft],
+    *,
+    source: str = "relax",
+    skipped_uids: Iterable[str] | None = None,
+    now: datetime | None = None,
+) -> ImportResult:
+    """Insert or update ``drafts`` for one source and retire that source's gaps.
+
+    Matching is ``(source, uid)``. Rows from any other source stay as they are,
+    even when the UID is the same. ``skipped_uids`` count as still present, so
+    a known event the parser skipped is not marked removed. A draft with
+    ``cancelled`` sets ``removed_at``. On success the ``feed_sources`` row for
+    ``source`` is stored with ``last_sync_status='ok'`` and no message.
+    """
+    created, updated, removed = _upsert(
+        session,
+        source,
+        drafts,
+        skipped_uids=set(skipped_uids or ()),
+        now=_moment(now),
+    )
+    skipped = len(set(skipped_uids or ()))
+    return ImportResult(
+        created=created,
+        updated=updated,
+        removed=removed,
+        skipped=skipped,
+    )
 
 
 def _upsert(
@@ -330,25 +365,30 @@ def _has_open_future_deadlines(session: Session, source_key: str, now: datetime)
     return any(ensure_utc(row.due_at) >= moment for row in rows)
 
 
-def _record_sync(
+def record_sync_status(
     session: Session,
-    source_key: str,
     *,
+    source: str = "relax",
     status: str,
-    message: str | None,
-    now: datetime,
+    message: str | None = None,
+    now: datetime | None = None,
 ) -> None:
-    """Remember the last fetch outcome without touching imported events."""
-    source = get_or_create_source(
+    """Store the last fetch outcome for one source without changing its events.
+
+    ``status`` is ``ok``, ``empty``, or ``error``. A second feed uses its own
+    key, for example ``source="hisinone"``, and does not overwrite ``relax``.
+    """
+    source_row = get_or_create_source(
         session,
-        key=source_key,
-        title="RELAX" if source_key == "relax" else source_key,
+        key=source,
+        title="RELAX" if source == "relax" else source,
     )
-    source.last_sync_at = now
-    source.last_sync_status = status
-    source.last_sync_message = message
-    source.updated_at = now
-    session.add(source)
+    moment = _moment(now)
+    source_row.last_sync_at = moment
+    source_row.last_sync_status = status
+    source_row.last_sync_message = message
+    source_row.updated_at = moment
+    session.add(source_row)
     session.commit()
 
 

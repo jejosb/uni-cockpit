@@ -625,6 +625,8 @@ def test_periodic_empty_feed_keeps_deadlines_and_shows_the_notice(tmp_path, capl
         again = client.get("/")
         assert "leeren Kalender" in page.text
         assert "Lab report is due" in page.text
+        assert SECRET_URL not in page.text
+        assert SECRET_TOKEN not in page.text
         assert "leeren Kalender" in again.text
         assert _snapshot(application, reminders.queue) == before
         assert _by_uid(application, LAB_UID).removed_at is None

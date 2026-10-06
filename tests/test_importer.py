@@ -1,5 +1,6 @@
 import logging
 import re
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
@@ -7,13 +8,17 @@ from sqlmodel import select
 
 from tests.conftest import FIXTURES, FROZEN_NOW, SECRET_TOKEN, SECRET_URL, read_fixture
 from uni_cockpit.config import Settings
+from uni_cockpit.feeds.ical import parse_icalendar
+from uni_cockpit.feeds.relax import RelaxDeadlineAdapter
 from uni_cockpit.models import CalendarEvent, FeedSource
 from uni_cockpit.services.fetcher import FeedFetchError, UrlCalendarFetcher
 from uni_cockpit.services.importer import (
     CalendarImportError,
     import_from_configured_url,
     import_payload,
+    record_sync_status,
     save_calendar_url,
+    upsert_events,
 )
 
 
@@ -210,6 +215,89 @@ def test_same_uid_from_another_source_survives_a_relax_import(session):
     ).one()
     assert essay.source == "relax"
     assert essay.removed_at is not None
+
+
+def test_upsert_events_source_defaults_to_relax_and_scopes_hisinone(session):
+    parsed = parse_icalendar(read_fixture("relax_deadlines.ics"))
+    adapter = RelaxDeadlineAdapter()
+    by_uid = {event.uid: adapter.adapt(event) for event in parsed.events}
+    lab = by_uid[_LAB_UID]
+    essay = by_uid["evt-essay@calendar.example.edu"]
+
+    defaulted = upsert_events(session, [lab, essay], now=FROZEN_NOW)
+    assert defaulted.created == 2
+    assert (
+        session.exec(
+            select(CalendarEvent).where(
+                CalendarEvent.uid == _LAB_UID,
+                CalendarEvent.source == "relax",
+            )
+        )
+        .one()
+        .title
+        == "Lab report is due"
+    )
+
+    upsert_events(
+        session,
+        [replace(lab, title="HISinOne exam"), replace(essay, title="HISinOne essay")],
+        source="hisinone",
+        now=FROZEN_NOW,
+    )
+    titles = {
+        row.source: row.title
+        for row in session.exec(select(CalendarEvent).where(CalendarEvent.uid == _LAB_UID))
+    }
+    assert titles == {"relax": "Lab report is due", "hisinone": "HISinOne exam"}
+
+    removed = upsert_events(
+        session,
+        [],
+        source="hisinone",
+        skipped_uids={_LAB_UID},
+        now=FROZEN_NOW,
+    )
+    assert removed.removed == 1
+    his_rows = {
+        row.uid: row
+        for row in session.exec(select(CalendarEvent).where(CalendarEvent.source == "hisinone"))
+    }
+    assert his_rows[_LAB_UID].removed_at is None
+    assert his_rows[_LAB_UID].title == "HISinOne exam"
+    assert his_rows[essay.uid].removed_at == FROZEN_NOW
+    relax_essay = session.exec(
+        select(CalendarEvent).where(
+            CalendarEvent.uid == essay.uid,
+            CalendarEvent.source == "relax",
+        )
+    ).one()
+    assert relax_essay.removed_at is None
+
+    his_source = session.exec(select(FeedSource).where(FeedSource.key == "hisinone")).one()
+    assert his_source.last_sync_status == "ok"
+    assert his_source.last_sync_message is None
+    assert his_source.last_sync_at == FROZEN_NOW
+    record_sync_status(
+        session,
+        source="hisinone",
+        status="empty",
+        message="HISinOne lieferte keinen Termin.",
+        now=FROZEN_NOW,
+    )
+    his_source = session.exec(select(FeedSource).where(FeedSource.key == "hisinone")).one()
+    relax_source = session.exec(select(FeedSource).where(FeedSource.key == "relax")).one()
+    assert his_source.last_sync_status == "empty"
+    assert his_source.last_sync_message == "HISinOne lieferte keinen Termin."
+    assert relax_source.last_sync_status == "ok"
+    assert relax_source.last_sync_message is None
+    kept_lab = session.exec(
+        select(CalendarEvent).where(
+            CalendarEvent.uid == _LAB_UID,
+            CalendarEvent.source == "hisinone",
+        )
+    ).one()
+    assert kept_lab.removed_at is None
+    assert kept_lab.title == "HISinOne exam"
 
 
 def test_empty_feed_is_applied_when_no_deadline_is_open(session):
