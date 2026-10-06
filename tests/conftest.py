@@ -16,6 +16,31 @@ SECRET_URL = (
     "https://calendar.example.edu/calendar/export_execute.php"
     f"?userid=9&authtoken={SECRET_TOKEN}&preset_what=courses&preset_time=custom"
 )
+# Latin "relax" with Cyrillic а (U+0430) instead of "a".
+HOMOGRAPH_FEED_URL = "https://rel\u0430x.reutlingen-university.de/export"
+# Exact strings from the issue and the product clarification. Each one must be
+# rejected; none of them is a suffix or subdomain match of the default host.
+DISALLOWED_HTTPS_URLS = (
+    "https://relax.reutlingen-university.de.evil.example/export",
+    "https://evil-relax.reutlingen-university.de/export",
+    "https://evil.relax.reutlingen-university.de/export",
+    "https://relax.reutlingen-university.de@evil.example/export",
+    "https://user@relax.reutlingen-university.de/export",
+    "https://10.0.0.1/export",
+    "https://93.184.216.34/",
+    "https://[::1]/",
+    "https://127.0.0.1/export",
+    "https://relax.reutlingen-university.de:8443/export",
+    HOMOGRAPH_FEED_URL,
+    SECRET_URL,
+)
+
+
+def poison_calendar_url(url: str) -> str:
+    if "authtoken=" in url:
+        return url
+    join = "&" if "?" in url else "?"
+    return f"{url}{join}authtoken={SECRET_TOKEN}"
 
 
 def read_fixture(name: str) -> bytes:

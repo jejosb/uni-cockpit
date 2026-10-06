@@ -4,8 +4,14 @@ from urllib.parse import urlsplit
 import httpx
 import pytest
 
-from tests.conftest import FIXTURES, SECRET_TOKEN, SECRET_URL, read_fixture
-from tests.test_urls import DISALLOWED_HTTPS_URLS
+from tests.conftest import (
+    DISALLOWED_HTTPS_URLS,
+    FIXTURES,
+    SECRET_TOKEN,
+    SECRET_URL,
+    poison_calendar_url,
+    read_fixture,
+)
 from uni_cockpit.logging_config import configure_logging
 from uni_cockpit.services.fetcher import (
     FeedFetchError,
@@ -172,13 +178,6 @@ def test_redirect_to_localhost_is_a_feed_fetch_error(caplog):
     assert not isinstance(exc.value, LocalFeedDisabledError)
 
 
-def _poison(url: str) -> str:
-    if "authtoken=" in url:
-        return url
-    join = "&" if "?" in url else "?"
-    return f"{url}{join}authtoken={SECRET_TOKEN}"
-
-
 def test_allowlisted_host_is_requested_once(caplog):
     seen: list[str] = []
     submitted = f"https://RELAX.Reutlingen-University.DE./calendar/export?authtoken={SECRET_TOKEN}"
@@ -210,7 +209,7 @@ def test_allowlisted_host_is_requested_once(caplog):
 @pytest.mark.parametrize("allow_local", [False, True])
 @pytest.mark.parametrize("submitted", DISALLOWED_HTTPS_URLS)
 def test_disallowed_host_makes_no_request(caplog, allow_local, submitted):
-    poisoned = _poison(submitted)
+    poisoned = poison_calendar_url(submitted)
     seen: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:

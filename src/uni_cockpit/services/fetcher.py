@@ -19,6 +19,7 @@ from uni_cockpit.logging_config import configure_logging
 from uni_cockpit.services.urls import (
     HOST_NOT_ALLOWED_MESSAGE,
     LOCAL_FEEDS_DISABLED_MESSAGE,
+    CalendarUrlCode,
     CalendarUrlError,
     validate_calendar_url,
 )
@@ -77,6 +78,10 @@ class UrlCalendarFetcher:
         self._allow_local = allow_local
         self._allowed_hosts = allowed_hosts
 
+    @property
+    def allowed_hosts(self) -> Collection[str]:
+        return self._allowed_hosts
+
     def fetch(self, url: str) -> bytes:
         configure_logging()
         try:
@@ -86,10 +91,10 @@ class UrlCalendarFetcher:
                 allowed_hosts=self._allowed_hosts,
             )
         except CalendarUrlError as exc:
-            if exc.code == "local":
+            if exc.code == CalendarUrlCode.LOCAL:
                 logger.warning("local calendar feed rejected")
                 raise LocalFeedDisabledError from None
-            if exc.code == "host":
+            if exc.code == CalendarUrlCode.HOST:
                 logger.warning("calendar host is not allowlisted")
                 raise HostNotAllowedError from None
             logger.warning("calendar url scheme is not allowed")
