@@ -11,7 +11,6 @@ unchanged. After a successful import the caller reschedules reminders.
 """
 
 import asyncio
-import contextlib
 import logging
 import re
 from datetime import datetime, timedelta
@@ -24,6 +23,15 @@ from uni_cockpit.services.importer import (
     effective_calendar_url,
     import_from_configured_url,
 )
+
+
+class RefreshImportError(Exception):
+    """An unexpected import failure. Only the exception type is kept, never a URL."""
+
+    def __init__(self, exc_type: str) -> None:
+        self.exc_type = exc_type
+        super().__init__(exc_type)
+
 
 logger = logging.getLogger(__name__)
 
@@ -95,27 +103,32 @@ class FeedRefresher:
         if task is None:
             return
         task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
+        try:
             await task
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            logger.exception("periodic calendar refresh stopped after an error")
 
     async def refresh_once(self) -> bool:
-        """Import once off the event loop, then reschedule. False keeps the rows."""
-        now = self._app.state.clock.now()
+        """Import once off the event loop, then reschedule. False keeps the rows.
+
+        A failure inside ``reschedule`` propagates so the refresh loop can log
+        it and keep waiting for the next interval.
+        """
         try:
-            result = await asyncio.to_thread(self._import_blocking, now)
+            result = await run_serialized_import(self._app, reschedule_preserved=False)
         except CalendarImportError:
             logger.warning("periodic calendar refresh failed; existing deadlines were kept")
             return False
-        except Exception as exc:
+        except RefreshImportError as exc:
             logger.warning(
                 "periodic calendar refresh failed (%s); existing deadlines were kept",
-                type(exc).__name__,
+                exc.exc_type,
             )
             return False
         if result is None:
             return False
-        with Session(self._app.state.engine, expire_on_commit=False) as session:
-            self._app.state.reminders.reschedule(session, now=self._app.state.clock.now())
         logger.info(
             "Periodic calendar refresh finished: %s new, %s updated, %s removed, %s skipped.",
             result.created,
@@ -124,18 +137,6 @@ class FeedRefresher:
             result.skipped,
         )
         return True
-
-    def _import_blocking(self, now: datetime):
-        app = self._app
-        with Session(app.state.engine, expire_on_commit=False) as session:
-            if effective_calendar_url(session, app.state.settings) is None:
-                return None
-            return import_from_configured_url(
-                session,
-                app.state.settings,
-                app.state.fetcher,
-                now=now,
-            )
 
     async def _run(self) -> None:
         while not self._stop.is_set():
@@ -147,7 +148,45 @@ class FeedRefresher:
                 return
             if self._stop.is_set():
                 return
-            await self.refresh_once()
+            try:
+                await self.refresh_once()
+            except Exception:
+                logger.exception(
+                    "periodic calendar refresh failed; the next interval will try again"
+                )
+
+
+def import_blocking(app: FastAPI, now: datetime):
+    with Session(app.state.engine, expire_on_commit=False) as session:
+        if effective_calendar_url(session, app.state.settings) is None:
+            return None
+        return import_from_configured_url(
+            session,
+            app.state.settings,
+            app.state.fetcher,
+            now=now,
+        )
+
+
+async def run_serialized_import(app: FastAPI, *, reschedule_preserved: bool = False):
+    """Import while holding ``app.state.import_lock``, then reschedule.
+
+    An empty feed that keeps existing deadlines does not reschedule, unless
+    ``reschedule_preserved`` is set. Startup uses that flag because the job
+    queue is still empty. A later periodic run leaves the existing jobs alone.
+    """
+    async with app.state.import_lock:
+        now = app.state.clock.now()
+        try:
+            result = await asyncio.to_thread(import_blocking, app, now)
+        except CalendarImportError:
+            raise
+        except Exception as exc:
+            raise RefreshImportError(type(exc).__name__) from None
+        if result is not None and (not result.preserved or reschedule_preserved):
+            with Session(app.state.engine, expire_on_commit=False) as session:
+                app.state.reminders.reschedule(session, now=app.state.clock.now())
+        return result
 
 
 def _minutes_label(interval: timedelta) -> str:

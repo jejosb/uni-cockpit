@@ -28,6 +28,7 @@ class CalendarParseError(Exception):
 class ParseResult:
     events: list[ParsedEvent]
     skipped: list[str]
+    skipped_uids: tuple[str, ...] = ()
 
 
 def parse_icalendar(payload: bytes | str) -> ParseResult:
@@ -41,6 +42,7 @@ def parse_icalendar(payload: bytes | str) -> ParseResult:
 
     events: list[ParsedEvent] = []
     skipped: list[str] = []
+    skipped_uids: list[str] = []
     for index, component in enumerate(_vevents(calendar), start=1):
         try:
             parsed = _parse_event(component, index)
@@ -48,12 +50,25 @@ def parse_icalendar(payload: bytes | str) -> ParseResult:
             reason = f"skipping unreadable calendar event #{index}"
             logger.warning(reason)
             skipped.append(reason)
+            uid = _component_uid(component)
+            if uid:
+                skipped_uids.append(uid)
             continue
         if isinstance(parsed, str):
             skipped.append(parsed)
+            uid = _component_uid(component)
+            if uid:
+                skipped_uids.append(uid)
             continue
         events.append(parsed)
-    return ParseResult(events=events, skipped=skipped)
+    return ParseResult(events=events, skipped=skipped, skipped_uids=tuple(skipped_uids))
+
+
+def _component_uid(component) -> str | None:
+    try:
+        return _text(component, "uid")
+    except Exception:
+        return None
 
 
 def _vevents(calendar: object):

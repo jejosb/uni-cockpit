@@ -22,6 +22,7 @@ def test_incomplete_events_are_reported():
     assert len(parsed.skipped) == 2
     assert any("without uid" in reason for reason in parsed.skipped)
     assert any("missing start" in reason for reason in parsed.skipped)
+    assert parsed.skipped_uids == ("evt-missing-start@calendar.example.edu",)
 
 
 def test_recurring_event_is_not_expanded():

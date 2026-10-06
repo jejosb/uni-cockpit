@@ -265,22 +265,21 @@ def test_cancelled_status_is_removed_and_comes_back(tmp_path):
     application.state.fetcher = fetcher
     with TestClient(application) as client:
         body = client.get("/").text
+        assert "Lab report is due" not in body
+        assert "Essay draft is due" in body
+        lab = _by_uid(application, LAB_UID)
+        essay = _by_uid(application, ESSAY_UID)
+        assert lab.removed_at == FROZEN_NOW
+        assert essay.removed_at is None
+        assert lab.id not in _job_ids(reminders.queue)
+        assert essay.id in _job_ids(reminders.queue)
+        assert len(_rows(application)) == 7
 
-    assert "Lab report is due" not in body
-    assert "Essay draft is due" in body
-    lab = _by_uid(application, LAB_UID)
-    essay = _by_uid(application, ESSAY_UID)
-    assert lab.removed_at == FROZEN_NOW
-    assert essay.removed_at is None
-    assert lab.id not in _job_ids(reminders.queue)
-    assert essay.id in _job_ids(reminders.queue)
-    assert len(_rows(application)) == 7
-
-    fetcher.payload = payload
-    asyncio.run(application.state.feed_sync.refresh_once())
-    lab = _by_uid(application, LAB_UID)
-    assert lab.removed_at is None
-    assert lab.id in _job_ids(reminders.queue)
+        fetcher.payload = payload
+        assert client.portal.call(application.state.feed_sync.refresh_once) is True
+        lab = _by_uid(application, LAB_UID)
+        assert lab.removed_at is None
+        assert lab.id in _job_ids(reminders.queue)
 
 
 def test_marking_done_in_the_cockpit_drops_the_row_and_reminders(tmp_path, monkeypatch):
@@ -593,3 +592,217 @@ def test_example_env_and_readme_document_the_refresh_and_done_button():
     assert "This release closes that story." in story
     assert "Erledigt" in readme
     assert "SYNC_INTERVAL_MINUTES" in readme
+    assert "leeren Kalender" in readme
+    assert "(source, uid)" in readme
+
+
+def _snapshot(application, queue: JobQueue):
+    rows = tuple(
+        sorted(
+            (row.uid, row.title, row.removed_at, row.is_done, row.source)
+            for row in _rows(application)
+        )
+    )
+    jobs = tuple(
+        sorted((id(job), job.data["event_id"], job.job.trigger.run_date) for job in queue.jobs())
+    )
+    return rows, jobs
+
+
+def test_periodic_empty_feed_keeps_deadlines_and_shows_the_notice(tmp_path, caplog):
+    application = _app(tmp_path, SECRET_URL, allow_local=False)
+    reminders = _QueueReminders()
+    application.state.reminders = reminders
+    fetcher = _StaticFetcher(read_fixture("relax_deadlines.ics"))
+    application.state.fetcher = fetcher
+    with TestClient(application) as client:
+        before = _snapshot(application, reminders.queue)
+        assert before[0]
+        fetcher.payload = read_fixture("empty_calendar.ics")
+        with caplog.at_level(logging.WARNING):
+            assert client.portal.call(application.state.feed_sync.refresh_once) is True
+        page = client.get("/")
+        again = client.get("/")
+        assert "leeren Kalender" in page.text
+        assert "Lab report is due" in page.text
+        assert "leeren Kalender" in again.text
+        assert _snapshot(application, reminders.queue) == before
+        assert _by_uid(application, LAB_UID).removed_at is None
+        warnings = [
+            record
+            for record in caplog.records
+            if record.getMessage()
+            == "calendar feed contained no deadlines; existing open deadlines were kept"
+        ]
+        assert len(warnings) == 1
+        assert "authtoken" not in caplog.text.lower()
+        assert "export_execute.php" not in caplog.text
+        assert SECRET_URL not in caplog.text
+        assert SECRET_TOKEN not in caplog.text
+        fetcher.payload = read_fixture("relax_deadlines.ics")
+        assert client.portal.call(application.state.feed_sync.refresh_once) is True
+        cleared = client.get("/")
+        assert "leeren Kalender" not in cleared.text
+        assert "Lab report is due" in cleared.text
+
+
+def test_periodic_invalid_feed_keeps_rows_jobs_and_shows_a_generic_error(tmp_path, caplog):
+    application = _app(tmp_path, SECRET_URL, allow_local=False)
+    reminders = _QueueReminders()
+    application.state.reminders = reminders
+    fetcher = _StaticFetcher(read_fixture("relax_deadlines.ics"))
+    application.state.fetcher = fetcher
+    with TestClient(application) as client:
+        before = _snapshot(application, reminders.queue)
+        fetcher.payload = read_fixture("invalid_feed.txt")
+        with caplog.at_level(logging.DEBUG):
+            assert client.portal.call(application.state.feed_sync.refresh_once) is False
+        assert _snapshot(application, reminders.queue) == before
+        page = client.get("/")
+        assert "kein gültiger iCalendar-Feed" in page.text
+        assert "Lab report is due" in page.text
+        assert "periodic calendar refresh failed; existing deadlines were kept" in caplog.text
+        assert "authtoken" not in caplog.text.lower()
+        assert "export_execute.php" not in caplog.text
+        assert SECRET_URL not in page.text
+        assert SECRET_URL not in caplog.text
+        assert SECRET_TOKEN not in caplog.text
+
+
+def test_manual_import_and_refresh_do_not_race(tmp_path):
+    base = read_fixture("relax_deadlines.ics")
+    extra = (
+        "BEGIN:VEVENT\n"
+        "UID:evt-new@calendar.example.edu\n"
+        "SUMMARY:Extra worksheet is due\n"
+        "DTSTART:20261018T100000Z\n"
+        "END:VEVENT\n"
+    )
+    combined = base.replace(b"END:VCALENDAR", extra.encode() + b"END:VCALENDAR")
+    application = _app(tmp_path, SECRET_URL, allow_local=False)
+    reminders = _QueueReminders()
+    application.state.reminders = reminders
+
+    class _Slow(_CountingFetcher):
+        def fetch(self, url: str) -> bytes:
+            with self._lock:
+                self.in_flight += 1
+                self.calls += 1
+                self.max_in_flight = max(self.max_in_flight, self.in_flight)
+            try:
+                time.sleep(0.2)
+                return self.payload
+            finally:
+                with self._lock:
+                    self.in_flight -= 1
+
+    fetcher = _Slow(base)
+    application.state.fetcher = fetcher
+    with TestClient(application) as client:
+        assert _by_uid(application, LAB_UID).title == "Lab report is due"
+        fetcher.payload = combined
+        future = client.portal.start_task_soon(application.state.feed_sync.refresh_once)
+        deadline = time.monotonic() + 2
+        while fetcher.in_flight < 1 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert fetcher.in_flight == 1
+        response = client.post("/import", headers={"HX-Request": "true"})
+        assert future.result(timeout=5) is True
+        assert response.status_code == 200
+        assert "IntegrityError" not in response.text
+        assert fetcher.max_in_flight == 1
+        matches = [row for row in _rows(application) if row.uid == "evt-new@calendar.example.edu"]
+        assert len(matches) == 1
+        expected = compute_reminder_times(matches[0].due_at, (72, 24), FROZEN_NOW)
+        actual = sorted(
+            job.job.trigger.run_date
+            for job in reminders.queue.jobs()
+            if job.data["event_id"] == matches[0].id
+        )
+        assert actual == expected
+
+
+def test_reschedule_error_is_logged_and_the_loop_continues(tmp_path, caplog):
+    application = _app(tmp_path, SECRET_URL, allow_local=False)
+    fetcher = _CountingFetcher(read_fixture("relax_deadlines.ics"))
+    application.state.fetcher = fetcher
+    calls = {"reschedule": 0}
+
+    class _Boom(_QueueReminders):
+        def reschedule(self, session, *, now):
+            calls["reschedule"] += 1
+            raise RuntimeError("database is locked")
+
+    application.state.reminders = _Boom()
+    application.state.feed_sync._interval = timedelta(milliseconds=20)
+
+    async def scenario():
+        await application.state.feed_sync.start()
+        for _ in range(80):
+            if fetcher.calls >= 2 and calls["reschedule"] >= 2:
+                break
+            await asyncio.sleep(0.02)
+        await application.state.feed_sync.stop()
+
+    with caplog.at_level(logging.DEBUG):
+        asyncio.run(scenario())
+
+    assert fetcher.calls >= 2
+    assert calls["reschedule"] >= 2
+    errors = [
+        record for record in caplog.records if record.levelno >= logging.ERROR and record.exc_info
+    ]
+    assert errors
+    assert any("next interval will try again" in record.message for record in errors)
+    assert "database is locked" in caplog.text
+    assert SECRET_URL not in caplog.text
+    assert SECRET_TOKEN not in caplog.text
+
+
+def test_shutdown_stops_reminders_when_refresh_stop_fails(tmp_path):
+    application = _app(tmp_path, None)
+    calls = {"reminders": 0}
+
+    async def remember_stop():
+        calls["reminders"] += 1
+
+    async def fail_stop():
+        raise RuntimeError("refresh stop failed")
+
+    application.state.reminders.stop = remember_stop
+    application.state.feed_sync.stop = fail_stop
+    with pytest.raises(RuntimeError, match="refresh stop failed"), TestClient(application):
+        pass
+    assert calls["reminders"] == 1
+
+
+def test_huge_deadline_ids_are_not_found(tmp_path):
+    url = FIXTURES.joinpath("relax_deadlines.ics").resolve().as_uri()
+    application = _app(tmp_path, url, allow_local=True)
+    huge = "9" * 30
+    with TestClient(application) as client:
+        for path in (f"/deadlines/{huge}/done", f"/deadlines/{huge}/undo"):
+            response = client.post(path)
+            assert response.status_code == 404
+            assert response.status_code != 500
+            assert "Diese Frist gibt es nicht." in response.text
+        overflow = str(2**63)
+        assert client.post(f"/deadlines/{overflow}/done").status_code == 404
+
+
+def test_telegram_huge_callback_id_does_not_crash(tmp_path):
+    application = _app(
+        tmp_path,
+        None,
+        telegram_bot_token="123456:TESTTOKEN",
+        telegram_chat_id="4242",
+    )
+    scheduler = application.state.reminders
+    assert isinstance(scheduler, TelegramReminderScheduler)
+    query = _Query(data="9" * 30, chat_id=4242)
+    asyncio.run(scheduler.on_done_callback(SimpleNamespace(callback_query=query), None))
+    assert query.answers == [None]
+    assert query.edits == []
+    borderline = _Query(data=str(2**63), chat_id=4242)
+    asyncio.run(scheduler.on_done_callback(SimpleNamespace(callback_query=borderline), None))
+    assert borderline.answers == [None]

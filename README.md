@@ -55,7 +55,11 @@ By default the app accepts only `https://` calendar URLs. `http://` (including `
 
 `REMINDER_OFFSETS_HOURS` defaults to `72,24` (3 days and 24 hours before the due instant). Each value is a whole number of real elapsed UTC hours from 1 to 720 (30 days). If any entry is invalid, the app logs a warning and falls back to `72,24` instead of exiting.
 
-`SYNC_INTERVAL_MINUTES` defaults to `60`. It is a whole number of minutes from 1 to 10080 (7 days). If the value is invalid, the app logs a warning and falls back to 60 instead of exiting. The periodic job waits that long after startup, then re-imports. It uses the same `Settings` object and the same fetcher as the rest of the app (`allow_local` is `DEV_ALLOW_LOCAL_FEEDS` on that object). The network fetch and the iCalendar parse run in a thread (`asyncio.to_thread`), so the event loop keeps serving pages.
+`SYNC_INTERVAL_MINUTES` defaults to `60`. It is a whole number of minutes from 1 to 10080 (7 days). If the value is invalid, the app logs a warning and falls back to 60 instead of exiting. The periodic job waits that long after startup, then re-imports. It uses the same `Settings` object and the same fetcher as the rest of the app (`allow_local` is `DEV_ALLOW_LOCAL_FEEDS` on that object). The network fetch and the iCalendar parse run in a thread (`asyncio.to_thread`), so the event loop keeps serving pages. Manual import and the periodic job share one lock, so they cannot insert the same UID at the same time.
+
+A valid calendar that contains no deadlines does not delete open future deadlines. The cockpit keeps showing “RELAX hat einen leeren Kalender geliefert, deine Fristen bleiben erhalten.” until a later fetch contains deadlines again. A feed that is not iCalendar leaves the rows and the scheduled reminders unchanged.
+
+An event the parser skips, for example because `SUMMARY` is missing, is not treated as deleted. `removed_at` is set only when the UID is really absent or the event has `STATUS:CANCELLED`. Each row stores a `source` (`relax` for this feed). Updates and removal apply only to that source, and `(source, uid)` is unique, so the same UID from HISinOne can sit beside the RELAX row.
 
 Telegram needs `TELEGRAM_BOT_TOKEN` (from @BotFather) and `TELEGRAM_CHAT_ID` (the chat that should receive the messages). Leave either one empty and the cockpit still starts; the log says reminders are disabled, and the Erledigt button in the browser still works. When both are set, the bot sends reminders and polls for the Erledigt callback only. It does not poll for commands. That polling starts in the background and does not block the web server from starting. The token and chat id are never written to the database and must not be committed.
 
@@ -94,7 +98,7 @@ All instants are stored in UTC and shown in Europe/Berlin. Remaining time is the
 
 ## Layout
 
-`src/uni_cockpit/feeds/` parses iCalendar into normalized events and keeps `RRULE` and `EXDATE` without expanding them, so a HISinOne timetable adapter can plug in later. `RelaxDeadlineAdapter` turns those events into deadline rows. `calendar_events` is unique on `(source, uid)`. `is_done` survives a re-import. `removed_at` is set when the UID is missing from a later feed or the event has `STATUS:CANCELLED`, and cleared when the event returns.
+`src/uni_cockpit/feeds/` parses iCalendar into normalized events and keeps `RRULE` and `EXDATE` without expanding them, so a HISinOne timetable adapter can plug in later. `RelaxDeadlineAdapter` turns those events into deadline rows. `calendar_events` is unique on `(source, uid)`, where `source` is `relax` or a later feed such as `hisinone`. `is_done` survives a re-import. `removed_at` is set when that source no longer contains the UID or the event has `STATUS:CANCELLED`, and cleared when the event returns. A skipped VEVENT is not a removal.
 
 `compute_reminder_times` decides the UTC instants. The python-telegram-bot `JobQueue` only schedules that list. On startup, after each successful import (including the periodic refresh), after **Erledigt** / **Rückgängig**, and after a removal, the app calls `app.state.reminders.reschedule(session, now=app.state.clock.now())`, which drops the previous jobs and queues the new ones. The job also checks `is_done` and `removed_at` when it runs, and sends nothing if either is set.
 

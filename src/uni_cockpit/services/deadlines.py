@@ -1,5 +1,6 @@
 """Open deadlines for the cockpit."""
 
+import re
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -9,6 +10,18 @@ from uni_cockpit.models import CalendarEvent
 from uni_cockpit.timeutil import ensure_utc, format_due_local, format_remaining, is_due_soon
 
 COURSE_FALLBACK = "Ohne Kurs"
+# SQLite INTEGER is signed 64-bit. Larger values raise OverflowError on lookup.
+MAX_EVENT_ID = 2**63 - 1
+
+
+def parse_event_id(raw: object) -> int | None:
+    """Return a positive SQLite id, or None when the value cannot be one."""
+    if not isinstance(raw, str) or re.fullmatch(r"[0-9]{1,19}", raw) is None:
+        return None
+    value = int(raw)
+    if value < 1 or value > MAX_EVENT_ID:
+        return None
+    return value
 
 
 @dataclass(frozen=True)

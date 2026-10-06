@@ -1,10 +1,12 @@
 """Import parsed events into SQLite.
 
-Re-importing the same UID updates the visible fields and leaves `is_done`
-untouched. An event that is missing from the new feed, or that arrives with
-`STATUS:CANCELLED`, gets `removed_at` set. When that event comes back without
-being cancelled, `removed_at` is cleared. A failed download or an unreadable
-feed raises before any row is changed. This module does not talk to Telegram.
+Re-importing the same `(source, uid)` updates the visible fields and leaves
+`is_done` untouched. A row from another source that happens to reuse the UID
+is left alone. An event that is missing from the new feed, or that arrives
+with `STATUS:CANCELLED`, gets `removed_at` set. A VEVENT the parser skipped
+is not missing. When that event comes back without being cancelled,
+`removed_at` is cleared. A failed download or an unreadable feed raises
+before any row is changed. This module does not talk to Telegram.
 After a successful import, the app calls ``app.state.reminders.reschedule``
 so reminder jobs follow the new rows.
 """
@@ -13,7 +15,7 @@ import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 
 from uni_cockpit.config import Settings
 from uni_cockpit.feeds.ical import CalendarParseError, parse_icalendar
@@ -42,20 +44,22 @@ def missing_url_error() -> CalendarImportError:
     )
 
 
+LOAD_FAILED_MESSAGE = (
+    "Der Kalender konnte nicht geladen werden. "
+    "Prüfe die URL und die Verbindung. Bereits importierte Fristen bleiben erhalten."
+)
+PARSE_FAILED_MESSAGE = (
+    "Die Antwort ist kein gültiger iCalendar-Feed. Bereits importierte Fristen bleiben erhalten."
+)
+EMPTY_FEED_MESSAGE = "RELAX hat einen leeren Kalender geliefert, deine Fristen bleiben erhalten."
+
+
 def load_failed_error() -> CalendarImportError:
-    return CalendarImportError(
-        "load",
-        "Der Kalender konnte nicht geladen werden. "
-        "Prüfe die URL und die Verbindung. Bereits importierte Fristen bleiben erhalten.",
-    )
+    return CalendarImportError("load", LOAD_FAILED_MESSAGE)
 
 
 def parse_failed_error() -> CalendarImportError:
-    return CalendarImportError(
-        "parse",
-        "Die Antwort ist kein gültiger iCalendar-Feed. "
-        "Bereits importierte Fristen bleiben erhalten.",
-    )
+    return CalendarImportError("parse", PARSE_FAILED_MESSAGE)
 
 
 @dataclass(frozen=True)
@@ -64,6 +68,7 @@ class ImportResult:
     updated: int
     removed: int
     skipped: int
+    preserved: bool = False
 
 
 def format_import_notice(result: ImportResult) -> str:
@@ -88,9 +93,14 @@ def import_from_configured_url(
         payload = fetcher.fetch(url)
     except LocalFeedDisabledError as exc:
         logger.warning("calendar import rejected a local feed")
-        raise CalendarImportError("local", str(exc)) from None
+        error = CalendarImportError("local", str(exc))
+        _record_sync(session, "relax", status="error", message=str(error), now=_moment(now))
+        raise error from None
     except FeedFetchError:
         logger.warning("calendar import failed because the feed could not be loaded")
+        _record_sync(
+            session, "relax", status="error", message=LOAD_FAILED_MESSAGE, now=_moment(now)
+        )
         raise load_failed_error() from None
     return import_payload(session, payload, now=now)
 
@@ -103,13 +113,45 @@ def import_payload(
     now: datetime | None = None,
 ) -> ImportResult:
     adapter = adapter or RelaxDeadlineAdapter()
+    moment = _moment(now)
     try:
         parsed = parse_icalendar(payload)
     except CalendarParseError:
         logger.warning("calendar import failed because the feed was not valid iCalendar")
+        _record_sync(
+            session,
+            adapter.source_key,
+            status="error",
+            message=PARSE_FAILED_MESSAGE,
+            now=moment,
+        )
         raise parse_failed_error() from None
     drafts = [adapter.adapt(event) for event in parsed.events]
-    created, updated, removed = _upsert(session, adapter.source_key, drafts, now=_moment(now))
+    if not any(draft.kind == "deadline" for draft in drafts) and _has_open_future_deadlines(
+        session, adapter.source_key, moment
+    ):
+        logger.warning("calendar feed contained no deadlines; existing open deadlines were kept")
+        _record_sync(
+            session,
+            adapter.source_key,
+            status="empty",
+            message=EMPTY_FEED_MESSAGE,
+            now=moment,
+        )
+        return ImportResult(
+            created=0,
+            updated=0,
+            removed=0,
+            skipped=len(parsed.skipped),
+            preserved=True,
+        )
+    created, updated, removed = _upsert(
+        session,
+        adapter.source_key,
+        drafts,
+        skipped_uids=set(parsed.skipped_uids),
+        now=moment,
+    )
     return ImportResult(
         created=created,
         updated=updated,
@@ -163,6 +205,7 @@ def _upsert(
     source_key: str,
     drafts: list[EventDraft],
     *,
+    skipped_uids: set[str],
     now: datetime,
 ) -> tuple[int, int, int]:
     source = get_or_create_source(
@@ -176,17 +219,17 @@ def _upsert(
     source_id = source.id
     if source_id is None:
         raise RuntimeError("feed source was not persisted")
-    seen: set[str] = set()
+    seen: set[str] = set(skipped_uids)
     for draft in drafts:
         seen.add(draft.uid)
         existing = session.exec(
             select(CalendarEvent).where(
-                CalendarEvent.source_id == source_id,
+                CalendarEvent.source == source_key,
                 CalendarEvent.uid == draft.uid,
             )
         ).first()
         if existing is None:
-            session.add(_new_event(source_id, draft, now))
+            session.add(_new_event(source_id, source_key, draft, now))
             created += 1
             if draft.cancelled:
                 removed += 1
@@ -196,25 +239,38 @@ def _upsert(
             removed += 1
         session.add(existing)
         updated += 1
-    stored = session.exec(select(CalendarEvent).where(CalendarEvent.source_id == source_id)).all()
+    stored = session.exec(select(CalendarEvent).where(CalendarEvent.source == source_key)).all()
+    kept_skipped = 0
     for row in stored:
+        if row.uid in skipped_uids and row.removed_at is None and row.kind == "deadline":
+            kept_skipped += 1
         if row.uid in seen or row.removed_at is not None:
             continue
         row.removed_at = now
         row.updated_at = now
         session.add(row)
         removed += 1
+    if kept_skipped:
+        logger.warning(
+            "kept %s known deadline(s) because their calendar event was skipped; "
+            "they were not marked removed",
+            kept_skipped,
+        )
     source.last_imported_at = now
+    source.last_sync_at = now
+    source.last_sync_status = "ok"
+    source.last_sync_message = None
     source.updated_at = now
     session.add(source)
     session.commit()
     return created, updated, removed
 
 
-def _new_event(source_id: int, draft: EventDraft, now: datetime) -> CalendarEvent:
+def _new_event(source_id: int, source_key: str, draft: EventDraft, now: datetime) -> CalendarEvent:
     assert source_id is not None
     return CalendarEvent(
         source_id=source_id,
+        source=source_key,
         uid=draft.uid,
         kind=draft.kind,
         title=draft.title,
@@ -260,6 +316,40 @@ def _retire_or_restore(existing: CalendarEvent, *, cancelled: bool, now: datetim
         return False
     existing.removed_at = None
     return False
+
+
+def _has_open_future_deadlines(session: Session, source_key: str, now: datetime) -> bool:
+    rows = session.exec(
+        select(CalendarEvent)
+        .where(CalendarEvent.source == source_key)
+        .where(CalendarEvent.kind == "deadline")
+        .where(col(CalendarEvent.is_done).is_(False))
+        .where(col(CalendarEvent.removed_at).is_(None))
+    ).all()
+    moment = ensure_utc(now)
+    return any(ensure_utc(row.due_at) >= moment for row in rows)
+
+
+def _record_sync(
+    session: Session,
+    source_key: str,
+    *,
+    status: str,
+    message: str | None,
+    now: datetime,
+) -> None:
+    """Remember the last fetch outcome without touching imported events."""
+    source = get_or_create_source(
+        session,
+        key=source_key,
+        title="RELAX" if source_key == "relax" else source_key,
+    )
+    source.last_sync_at = now
+    source.last_sync_status = status
+    source.last_sync_message = message
+    source.updated_at = now
+    session.add(source)
+    session.commit()
 
 
 def _moment(now: datetime | None) -> datetime:

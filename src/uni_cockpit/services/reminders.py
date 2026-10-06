@@ -28,7 +28,12 @@ from telegram.ext import Application, CallbackQueryHandler, JobQueue
 
 from uni_cockpit.config import Settings
 from uni_cockpit.models import CalendarEvent
-from uni_cockpit.services.deadlines import course_label, list_open_deadlines, set_deadline_done
+from uni_cockpit.services.deadlines import (
+    course_label,
+    list_open_deadlines,
+    parse_event_id,
+    set_deadline_done,
+)
 from uni_cockpit.timeutil import ensure_utc, format_due_local, format_remaining
 
 logger = logging.getLogger(__name__)
@@ -466,9 +471,7 @@ def _register_done_handler(application, callback) -> None:
 
 
 def _callback_event_id(data: object) -> int | None:
-    if not isinstance(data, str) or re.fullmatch(r"[0-9]+", data) is None:
-        return None
-    return int(data)
+    return parse_event_id(data)
 
 
 def _callback_chat_matches(query, expected: int | str) -> bool:

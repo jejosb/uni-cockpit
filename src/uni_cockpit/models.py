@@ -28,14 +28,22 @@ class FeedSource(SQLModel, table=True):
     last_imported_at: datetime | None = Field(
         default=None, sa_column=Column(UtcDateTime(), nullable=True)
     )
+    last_sync_at: datetime | None = Field(
+        default=None, sa_column=Column(UtcDateTime(), nullable=True)
+    )
+    # ok, empty, or error. The cockpit reads this after a reload.
+    last_sync_status: str | None = None
+    last_sync_message: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
 
 
 class CalendarEvent(SQLModel, table=True):
     __tablename__ = "calendar_events"
-    __table_args__ = (UniqueConstraint("source_id", "uid", name="uq_calendar_event_source_uid"),)
+    __table_args__ = (UniqueConstraint("source", "uid", name="uq_calendar_event_source_uid"),)
 
     id: int | None = Field(default=None, primary_key=True)
     source_id: int = Field(foreign_key="feed_sources.id", index=True)
+    # Which feed produced the row. Removal only touches the same value.
+    source: str = Field(default="relax", index=True)
     uid: str
     kind: str = Field(index=True)
     title: str

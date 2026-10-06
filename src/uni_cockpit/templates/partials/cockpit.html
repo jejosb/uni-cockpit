@@ -1,3 +1,8 @@
+{% if sync_status == "empty" and sync_message %}
+  <p class="banner banner-notice" role="status">{{ sync_message }}{% if sync_at_label %} <span class="hint">({{ sync_at_label }})</span>{% endif %}</p>
+{% elif sync_status == "error" and sync_message %}
+  <p class="banner banner-error" role="alert">{{ sync_message }}{% if sync_at_label %} <span class="hint">({{ sync_at_label }})</span>{% endif %}</p>
+{% endif %}
 {% if error %}
   <p class="banner banner-error" role="alert">{{ error }}</p>
 {% endif %}
