@@ -110,7 +110,8 @@ def test_offset_of_720_hours_is_accepted(caplog):
         assert parse_reminder_offsets("720") == (720,)
         assert parse_reminder_offsets("1") == (1,)
     assert caplog.records == []
-    times = compute_reminder_times(QUIZ_DUE_UTC, [720], BEFORE_BOTH)
+    before_the_reminder = QUIZ_DUE_UTC - timedelta(hours=720, minutes=1)
+    times = compute_reminder_times(QUIZ_DUE_UTC, [720], before_the_reminder)
     assert times == [QUIZ_DUE_UTC - timedelta(hours=720)]
 
 
