@@ -5,7 +5,9 @@ are read only from ``TELEGRAM_BOT_TOKEN`` and ``TELEGRAM_CHAT_ID``.
 ``reminder_offsets_hours`` is the raw ``REMINDER_OFFSETS_HOURS`` string.
 Parsing accepts whole ASCII hours from 1 to 720 and otherwise falls back to
 72,24 (see ``services.reminders``). Offsets are elapsed UTC hours (see the
-README section "Time handling").
+README section "Time handling"). ``sync_interval_minutes`` is the raw
+``SYNC_INTERVAL_MINUTES`` string. Parsing accepts a whole number of minutes
+from 1 to 10080 and otherwise falls back to 60 (see ``services.sync``).
 """
 
 from pydantic import Field
@@ -26,6 +28,7 @@ class Settings(BaseSettings):
     reminder_offsets_hours: str = "72,24"
     telegram_bot_token: str | None = Field(default=None, repr=False)
     telegram_chat_id: str | None = Field(default=None, repr=False)
+    sync_interval_minutes: str = "60"
 
     @property
     def relax_url(self) -> str | None:

@@ -453,10 +453,12 @@ def test_a_rejected_token_disables_reminders_without_leaking_it(tmp_path, caplog
 class _FakeBot:
     def __init__(self) -> None:
         self.messages: list[tuple[object, str]] = []
+        self.markups: list[object] = []
         self.shutdowns = 0
 
-    async def send_message(self, *, chat_id, text):
+    async def send_message(self, *, chat_id, text, reply_markup=None):
         self.messages.append((chat_id, text))
+        self.markups.append(reply_markup)
 
     async def shutdown(self):
         self.shutdowns += 1
@@ -468,6 +470,11 @@ class _FakeApplication:
         self.bot = _FakeBot()
         self.running = False
         self.fail = fail
+        self.handlers: list[object] = []
+        self.updater = None
+
+    def add_handler(self, handler, group: int = 0) -> None:
+        self.handlers.append(handler)
 
     async def initialize(self):
         if self.fail is not None:

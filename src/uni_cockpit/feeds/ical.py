@@ -84,6 +84,7 @@ def _parse_event(component, index: int) -> ParsedEvent | str:
         all_day=all_day,
         recurrence_rule=_recurrence_rule(component),
         exception_dates=_exception_instants(component),
+        status=_text(component, "status"),
     )
 
 

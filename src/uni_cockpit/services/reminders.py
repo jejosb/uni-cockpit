@@ -4,13 +4,18 @@
 instant and drops anything that is not still in the future. A
 python-telegram-bot ``JobQueue`` schedules that list and nothing else.
 
-After an import or any local change (due time, ``is_done``, ``removed_at``),
-call ``app.state.reminders.reschedule(session, now=app.state.clock.now())``.
+After an import, a removal, or marking a deadline done, call
+``app.state.reminders.reschedule(session, now=app.state.clock.now())``.
 That replaces the in-memory jobs. Reminders are not stored in SQLite, so a
 restart builds the schedule again and does not send reminders that are already
 past.
+
+Each reminder carries an "Erledigt" button. The callback data is only the
+event id. The handler accepts it only from ``TELEGRAM_CHAT_ID``.
 """
 
+import asyncio
+import contextlib
 import logging
 import re
 from collections.abc import Awaitable, Callable, Sequence
@@ -18,11 +23,12 @@ from datetime import datetime, timedelta
 from typing import Protocol
 
 from sqlmodel import Session
-from telegram.ext import Application, JobQueue
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CallbackQueryHandler, JobQueue
 
 from uni_cockpit.config import Settings
 from uni_cockpit.models import CalendarEvent
-from uni_cockpit.services.deadlines import course_label, list_open_deadlines
+from uni_cockpit.services.deadlines import course_label, list_open_deadlines, set_deadline_done
 from uni_cockpit.timeutil import ensure_utc, format_due_local, format_remaining
 
 logger = logging.getLogger(__name__)
@@ -119,6 +125,11 @@ def _parse_offset_list(raw: str) -> tuple[int, ...]:
     return tuple(offsets)
 
 
+def done_keyboard(event_id: int) -> InlineKeyboardMarkup:
+    """One button. ``callback_data`` is the event id and nothing else."""
+    return InlineKeyboardMarkup([[InlineKeyboardButton("Erledigt", callback_data=str(event_id))]])
+
+
 def format_reminder_message(
     *,
     title: str,
@@ -177,7 +188,11 @@ async def deliver_reminder(
             due_at=event.due_at,
             now=now,
         )
-    await context.bot.send_message(chat_id=chat_id, text=text)
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=text,
+        reply_markup=done_keyboard(event_id),
+    )
 
 
 def reschedule_reminders(
@@ -237,11 +252,13 @@ class DisabledReminderScheduler:
 
 
 class TelegramReminderScheduler:
-    """Starts a bot without polling and lets its JobQueue own the schedule.
+    """Starts a bot and lets its JobQueue own the reminder schedule.
 
-    ``clock.now()`` is called when a job runs. ``create_app`` passes a clock
-    that reads ``app.state.clock``, so the schedule and the remaining-time
-    text use that one clock.
+    Polling for the "Erledigt" callback runs in a background task. ``start``
+    does not wait for Telegram, so FastAPI can serve pages while the bot
+    connects. ``clock.now()`` is called when a job runs. ``create_app`` passes
+    a clock that reads ``app.state.clock``, so the schedule and the
+    remaining-time text use that one clock.
     """
 
     def __init__(
@@ -258,6 +275,7 @@ class TelegramReminderScheduler:
         self._engine = engine
         self._clock = clock
         self._application: Application | None = None
+        self._polling_task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
         try:
@@ -274,6 +292,7 @@ class TelegramReminderScheduler:
                 'Install python-telegram-bot with the "job-queue" extra.'
             )
             return
+        _register_done_handler(application, self.on_done_callback)
         try:
             await application.initialize()
             await application.start()
@@ -286,17 +305,86 @@ class TelegramReminderScheduler:
             await _close_application(application)
             return
         self._application = application
+        self._arm_callback_polling(application)
         logger.info(
             "Telegram reminders enabled (offsets %s hours, elapsed UTC).",
             ",".join(str(hours) for hours in self.offsets_hours),
         )
 
     async def stop(self) -> None:
+        await self._stop_callback_polling()
         application = self._application
         self._application = None
         if application is None:
             return
+        updater = getattr(application, "updater", None)
+        if updater is not None and getattr(updater, "running", False):
+            try:
+                await updater.stop()
+            except Exception as exc:
+                logger.debug("stopping telegram polling failed (%s)", type(exc).__name__)
         await _close_application(application)
+
+    async def on_done_callback(self, update, context) -> None:
+        """Mark the deadline done when the button comes from the configured chat."""
+        query = getattr(update, "callback_query", None)
+        if query is None:
+            return
+        if not _callback_chat_matches(query, self.chat_id):
+            logger.warning("Ignored a Telegram done button from an unexpected chat.")
+            await query.answer()
+            return
+        event_id = _callback_event_id(getattr(query, "data", None))
+        if event_id is None:
+            await query.answer()
+            return
+        now = self._clock.now()
+        with Session(self._engine, expire_on_commit=False) as session:
+            event = set_deadline_done(session, event_id, done=True, now=now)
+            if event is None:
+                await query.answer()
+                return
+            self.reschedule(session, now=now)
+        await query.answer("Erledigt")
+        await _confirm_done_message(query)
+
+    def _arm_callback_polling(self, application) -> None:
+        updater = getattr(application, "updater", None)
+        if updater is None or not hasattr(updater, "start_polling"):
+            return
+        if self._polling_task is not None and not self._polling_task.done():
+            return
+        # start_polling contacts Telegram before it returns. Awaiting it here
+        # would hold FastAPI startup, so the lifespan only schedules the task.
+        self._polling_task = asyncio.create_task(
+            self._poll_for_callbacks(updater),
+            name="telegram-callback-polling",
+        )
+
+    async def _poll_for_callbacks(self, updater) -> None:
+        try:
+            await updater.start_polling(
+                allowed_updates=["callback_query"],
+                drop_pending_updates=False,
+                bootstrap_retries=0,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error(
+                "Telegram callback polling could not be started (%s). "
+                "Sending reminders still works.",
+                type(exc).__name__,
+            )
+
+    async def _stop_callback_polling(self) -> None:
+        task = self._polling_task
+        self._polling_task = None
+        if task is None or task.done():
+            return
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
 
     def reschedule(self, session: Session, *, now: datetime) -> int:
         application = self._application
@@ -367,6 +455,46 @@ def _blank_to_none(value: str | None) -> str | None:
         return None
     stripped = value.strip()
     return stripped or None
+
+
+def _register_done_handler(application, callback) -> None:
+    add_handler = getattr(application, "add_handler", None)
+    if add_handler is None:
+        logger.error("Telegram done button is unavailable because handlers cannot be registered.")
+        return
+    add_handler(CallbackQueryHandler(callback))
+
+
+def _callback_event_id(data: object) -> int | None:
+    if not isinstance(data, str) or re.fullmatch(r"[0-9]+", data) is None:
+        return None
+    return int(data)
+
+
+def _callback_chat_matches(query, expected: int | str) -> bool:
+    message = getattr(query, "message", None)
+    chat = getattr(message, "chat", None)
+    actual = getattr(chat, "id", None)
+    if actual is None:
+        actual = getattr(message, "chat_id", None)
+    if actual is None:
+        return False
+    return str(actual) == str(expected)
+
+
+async def _confirm_done_message(query) -> None:
+    message = getattr(query, "message", None)
+    original = getattr(message, "text", None) or ""
+    if original.endswith("Erledigt."):
+        text = original
+    elif original:
+        text = f"{original}\n\nErledigt."
+    else:
+        text = "Erledigt."
+    try:
+        await query.edit_message_text(text=text, reply_markup=None)
+    except Exception as exc:
+        logger.warning("Could not edit the Telegram reminder (%s).", type(exc).__name__)
 
 
 def _job_name(event_id: int, when: datetime) -> str:

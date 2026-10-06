@@ -1,10 +1,12 @@
 """Import parsed events into SQLite.
 
 Re-importing the same UID updates the visible fields and leaves `is_done`
-untouched. A failed download or an unreadable feed raises before any row is
-changed. This module does not talk to Telegram. After a successful import,
-the app calls ``app.state.reminders.reschedule`` so reminder jobs follow the
-new rows.
+untouched. An event that is missing from the new feed, or that arrives with
+`STATUS:CANCELLED`, gets `removed_at` set. When that event comes back without
+being cancelled, `removed_at` is cleared. A failed download or an unreadable
+feed raises before any row is changed. This module does not talk to Telegram.
+After a successful import, the app calls ``app.state.reminders.reschedule``
+so reminder jobs follow the new rows.
 """
 
 import logging
@@ -19,6 +21,7 @@ from uni_cockpit.feeds.parsed import EventDraft
 from uni_cockpit.feeds.relax import RelaxDeadlineAdapter
 from uni_cockpit.models import CalendarEvent, FeedSource
 from uni_cockpit.services.fetcher import FeedFetchError, LocalFeedDisabledError
+from uni_cockpit.timeutil import ensure_utc
 
 logger = logging.getLogger(__name__)
 
@@ -59,17 +62,25 @@ def parse_failed_error() -> CalendarImportError:
 class ImportResult:
     created: int
     updated: int
+    removed: int
     skipped: int
 
 
 def format_import_notice(result: ImportResult) -> str:
     return (
         f"Kalender importiert: {result.created} neu, "
-        f"{result.updated} aktualisiert, {result.skipped} übersprungen."
+        f"{result.updated} aktualisiert, {result.removed} entfernt, "
+        f"{result.skipped} übersprungen."
     )
 
 
-def import_from_configured_url(session: Session, settings: Settings, fetcher) -> ImportResult:
+def import_from_configured_url(
+    session: Session,
+    settings: Settings,
+    fetcher,
+    *,
+    now: datetime | None = None,
+) -> ImportResult:
     url = effective_calendar_url(session, settings)
     if not url:
         raise missing_url_error()
@@ -81,7 +92,7 @@ def import_from_configured_url(session: Session, settings: Settings, fetcher) ->
     except FeedFetchError:
         logger.warning("calendar import failed because the feed could not be loaded")
         raise load_failed_error() from None
-    return import_payload(session, payload)
+    return import_payload(session, payload, now=now)
 
 
 def import_payload(
@@ -89,6 +100,7 @@ def import_payload(
     payload: bytes | str,
     *,
     adapter: RelaxDeadlineAdapter | None = None,
+    now: datetime | None = None,
 ) -> ImportResult:
     adapter = adapter or RelaxDeadlineAdapter()
     try:
@@ -97,8 +109,13 @@ def import_payload(
         logger.warning("calendar import failed because the feed was not valid iCalendar")
         raise parse_failed_error() from None
     drafts = [adapter.adapt(event) for event in parsed.events]
-    created, updated = _upsert(session, adapter.source_key, drafts)
-    return ImportResult(created=created, updated=updated, skipped=len(parsed.skipped))
+    created, updated, removed = _upsert(session, adapter.source_key, drafts, now=_moment(now))
+    return ImportResult(
+        created=created,
+        updated=updated,
+        removed=removed,
+        skipped=len(parsed.skipped),
+    )
 
 
 def stored_relax_url(session: Session) -> str | None:
@@ -141,7 +158,13 @@ def get_or_create_source(session: Session, *, key: str, title: str) -> FeedSourc
     return source
 
 
-def _upsert(session: Session, source_key: str, drafts: list[EventDraft]) -> tuple[int, int]:
+def _upsert(
+    session: Session,
+    source_key: str,
+    drafts: list[EventDraft],
+    *,
+    now: datetime,
+) -> tuple[int, int, int]:
     source = get_or_create_source(
         session,
         key=source_key,
@@ -149,11 +172,13 @@ def _upsert(session: Session, source_key: str, drafts: list[EventDraft]) -> tupl
     )
     created = 0
     updated = 0
-    now = _now()
+    removed = 0
     source_id = source.id
     if source_id is None:
         raise RuntimeError("feed source was not persisted")
+    seen: set[str] = set()
     for draft in drafts:
+        seen.add(draft.uid)
         existing = session.exec(
             select(CalendarEvent).where(
                 CalendarEvent.source_id == source_id,
@@ -163,15 +188,27 @@ def _upsert(session: Session, source_key: str, drafts: list[EventDraft]) -> tupl
         if existing is None:
             session.add(_new_event(source_id, draft, now))
             created += 1
+            if draft.cancelled:
+                removed += 1
             continue
         _apply_draft(existing, draft, now)
+        if _retire_or_restore(existing, cancelled=draft.cancelled, now=now):
+            removed += 1
         session.add(existing)
         updated += 1
+    stored = session.exec(select(CalendarEvent).where(CalendarEvent.source_id == source_id)).all()
+    for row in stored:
+        if row.uid in seen or row.removed_at is not None:
+            continue
+        row.removed_at = now
+        row.updated_at = now
+        session.add(row)
+        removed += 1
     source.last_imported_at = now
     source.updated_at = now
     session.add(source)
     session.commit()
-    return created, updated
+    return created, updated, removed
 
 
 def _new_event(source_id: int, draft: EventDraft, now: datetime) -> CalendarEvent:
@@ -192,13 +229,14 @@ def _new_event(source_id: int, draft: EventDraft, now: datetime) -> CalendarEven
         exception_dates=draft.exception_dates,
         is_done=False,
         done_at=None,
-        removed_at=None,
+        removed_at=now if draft.cancelled else None,
         created_at=now,
         updated_at=now,
     )
 
 
 def _apply_draft(existing: CalendarEvent, draft: EventDraft, now: datetime) -> None:
+    """Copy the feed fields. `is_done` and `done_at` stay as Joshua left them."""
     existing.kind = draft.kind
     existing.title = draft.title
     existing.course = draft.course
@@ -211,6 +249,23 @@ def _apply_draft(existing: CalendarEvent, draft: EventDraft, now: datetime) -> N
     existing.recurrence_rule = draft.recurrence_rule
     existing.exception_dates = draft.exception_dates
     existing.updated_at = now
+
+
+def _retire_or_restore(existing: CalendarEvent, *, cancelled: bool, now: datetime) -> bool:
+    """Set or clear `removed_at`. Return True when this pass newly retires the row."""
+    if cancelled:
+        if existing.removed_at is None:
+            existing.removed_at = now
+            return True
+        return False
+    existing.removed_at = None
+    return False
+
+
+def _moment(now: datetime | None) -> datetime:
+    if now is None:
+        return _now()
+    return ensure_utc(now)
 
 
 def _now() -> datetime:

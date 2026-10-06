@@ -16,6 +16,7 @@ class ParsedEvent:
     all_day: bool
     recurrence_rule: str | None
     exception_dates: tuple[datetime, ...]
+    status: str | None = None
 
 
 @dataclass(frozen=True)
@@ -38,3 +39,4 @@ class EventDraft:
     all_day: bool
     recurrence_rule: str | None
     exception_dates: str | None
+    cancelled: bool = False

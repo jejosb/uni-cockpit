@@ -1,7 +1,7 @@
 """Server-rendered cockpit. HTMX refreshes the deadline list in place."""
 
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from fastapi import FastAPI, Form, Request
@@ -13,7 +13,7 @@ from sqlmodel import Session
 from uni_cockpit.config import Settings
 from uni_cockpit.db import create_db_engine, init_db
 from uni_cockpit.logging_config import configure_logging
-from uni_cockpit.services.deadlines import deadline_views
+from uni_cockpit.services.deadlines import deadline_views, set_deadline_done
 from uni_cockpit.services.fetcher import UrlCalendarFetcher
 from uni_cockpit.services.importer import (
     CalendarImportError,
@@ -28,6 +28,7 @@ from uni_cockpit.services.reminders import (
     build_reminder_scheduler,
     parse_reminder_offsets,
 )
+from uni_cockpit.services.sync import FeedRefresher, parse_sync_interval_minutes
 from uni_cockpit.services.urls import CalendarUrlError, mask_secret_url, validate_calendar_url
 from uni_cockpit.timeutil import SystemClock
 
@@ -71,15 +72,20 @@ def create_app(
                 if app.state.settings.relax_url:
                     try:
                         result = import_from_configured_url(
-                            session, app.state.settings, app.state.fetcher
+                            session,
+                            app.state.settings,
+                            app.state.fetcher,
+                            now=app.state.clock.now(),
                         )
                     except CalendarImportError as exc:
                         app.state.import_error = str(exc)
                     else:
                         app.state.import_notice = format_import_notice(result)
                 _reschedule_reminders(app, session)
+            await app.state.feed_sync.start()
             yield
         finally:
+            await app.state.feed_sync.stop()
             await app.state.reminders.stop()
 
     app = FastAPI(title="uni-cockpit", lifespan=lifespan)
@@ -91,8 +97,14 @@ def create_app(
         reminders = build_reminder_scheduler(settings, engine, _StateClock(app), offsets)
     app.state.reminders = reminders
     app.state.reminder_offsets = offsets
+    app.state.sync_interval_minutes = parse_sync_interval_minutes(settings.sync_interval_minutes)
+    app.state.feed_sync = FeedRefresher(
+        app,
+        interval=timedelta(minutes=app.state.sync_interval_minutes),
+    )
     app.state.import_error = None
     app.state.import_notice = None
+    app.state.undo_event_id = None
     app.state.templates = Jinja2Templates(directory=str(TEMPLATES))
     app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
 
@@ -107,6 +119,14 @@ def create_app(
             return _render_partial(request, error=error, notice=notice)
         _store_flash(request, error, notice)
         return RedirectResponse("/", status_code=303)
+
+    @app.post("/deadlines/{event_id}/done")
+    def mark_done(request: Request, event_id: int):
+        return _set_done(request, event_id, done=True)
+
+    @app.post("/deadlines/{event_id}/undo")
+    def undo_done(request: Request, event_id: int):
+        return _set_done(request, event_id, done=False)
 
     @app.get("/settings", response_class=HTMLResponse)
     def settings_page(request: Request) -> HTMLResponse:
@@ -144,7 +164,10 @@ def _import_now(request: Request) -> tuple[str | None, str | None]:
     with Session(request.app.state.engine, expire_on_commit=False) as session:
         try:
             result = import_from_configured_url(
-                session, request.app.state.settings, request.app.state.fetcher
+                session,
+                request.app.state.settings,
+                request.app.state.fetcher,
+                now=request.app.state.clock.now(),
             )
         except CalendarImportError as exc:
             return str(exc), None
@@ -152,25 +175,58 @@ def _import_now(request: Request) -> tuple[str | None, str | None]:
         return None, format_import_notice(result)
 
 
+def _set_done(request: Request, event_id: int, *, done: bool):
+    now = request.app.state.clock.now()
+    with Session(request.app.state.engine, expire_on_commit=False) as session:
+        event = set_deadline_done(session, event_id, done=done, now=now)
+        if event is None:
+            return HTMLResponse("Diese Frist gibt es nicht.", status_code=404)
+        _reschedule_reminders(request.app, session)
+    if done:
+        notice = None
+        undo_id: int | None = event_id
+    else:
+        notice = "Wieder als offen markiert."
+        undo_id = None
+    if request.headers.get("hx-request") == "true":
+        return _render_partial(request, error=None, notice=notice, undo_id=undo_id)
+    _store_flash(request, None, notice, undo_id=undo_id)
+    return RedirectResponse("/", status_code=303)
+
+
 def _reschedule_reminders(app: FastAPI, session: Session) -> None:
-    """Hook for imports. Story 4 can call ``app.state.reminders.reschedule`` too."""
+    """Keep pending reminder jobs aligned with the database."""
     app.state.reminders.reschedule(session, now=app.state.clock.now())
 
 
-def _store_flash(request: Request, error: str | None, notice: str | None) -> None:
+def _store_flash(
+    request: Request,
+    error: str | None,
+    notice: str | None,
+    *,
+    undo_id: int | None = None,
+) -> None:
     request.app.state.import_error = error
     request.app.state.import_notice = notice
+    request.app.state.undo_event_id = undo_id
 
 
-def _consume_flash(request: Request) -> tuple[str | None, str | None]:
+def _consume_flash(request: Request) -> tuple[str | None, str | None, int | None]:
     error = request.app.state.import_error
     notice = request.app.state.import_notice
+    undo_id = request.app.state.undo_event_id
     request.app.state.import_error = None
     request.app.state.import_notice = None
-    return error, notice
+    request.app.state.undo_event_id = None
+    return error, notice, undo_id
 
 
-def _page_context(request: Request, error: str | None, notice: str | None) -> dict[str, object]:
+def _page_context(
+    request: Request,
+    error: str | None,
+    notice: str | None,
+    undo_id: int | None = None,
+) -> dict[str, object]:
     with Session(request.app.state.engine, expire_on_commit=False) as session:
         deadlines = deadline_views(session, request.app.state.clock.now())
         has_url = effective_calendar_url(session, request.app.state.settings) is not None
@@ -178,6 +234,7 @@ def _page_context(request: Request, error: str | None, notice: str | None) -> di
         "deadlines": deadlines,
         "error": error,
         "notice": notice,
+        "undo_id": undo_id,
         "has_url": has_url,
     }
 
@@ -189,9 +246,10 @@ def _render_index(
     notice: str | None = None,
     status_code: int = 200,
 ) -> HTMLResponse:
+    undo_id = None
     if error is None and notice is None:
-        error, notice = _consume_flash(request)
-    context = _page_context(request, error, notice)
+        error, notice, undo_id = _consume_flash(request)
+    context = _page_context(request, error, notice, undo_id)
     return request.app.state.templates.TemplateResponse(
         request,
         "index.html",
@@ -200,11 +258,17 @@ def _render_index(
     )
 
 
-def _render_partial(request: Request, *, error: str | None, notice: str | None) -> HTMLResponse:
+def _render_partial(
+    request: Request,
+    *,
+    error: str | None,
+    notice: str | None,
+    undo_id: int | None = None,
+) -> HTMLResponse:
     return request.app.state.templates.TemplateResponse(
         request,
         "partials/cockpit.html",
-        _page_context(request, error, notice),
+        _page_context(request, error, notice, undo_id),
     )
 
 

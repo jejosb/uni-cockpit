@@ -48,6 +48,22 @@ def test_all_day_deadline_is_due_at_end_of_berlin_day():
     assert draft.due_at == datetime(2026, 10, 20, 21, 59, 59, tzinfo=UTC)
 
 
+def test_cancelled_status_is_kept_on_the_parsed_event():
+    payload = read_fixture("relax_deadlines.ics").replace(
+        b"UID:evt-lab@calendar.example.edu\n",
+        b"UID:evt-lab@calendar.example.edu\nSTATUS:CANCELLED\n",
+        1,
+    )
+    parsed = parse_icalendar(payload)
+    lab = next(event for event in parsed.events if event.uid == "evt-lab@calendar.example.edu")
+    assert lab.status == "CANCELLED"
+    draft = RelaxDeadlineAdapter().adapt(lab)
+    assert draft.cancelled is True
+    other = next(event for event in parsed.events if event.uid == "evt-essay@calendar.example.edu")
+    assert other.status is None
+    assert RelaxDeadlineAdapter().adapt(other).cancelled is False
+
+
 def test_course_falls_back_to_kurs_line():
     parsed = parse_icalendar(read_fixture("relax_deadlines.ics"))
     seminar = next(event for event in parsed.events if event.uid.startswith("evt-seminar"))

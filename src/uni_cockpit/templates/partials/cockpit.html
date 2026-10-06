@@ -4,6 +4,14 @@
 {% if notice %}
   <p class="banner banner-notice" role="status">{{ notice }}</p>
 {% endif %}
+{% if undo_id %}
+  <div class="banner banner-notice undo-row" role="status">
+    <span>Als erledigt markiert.</span>
+    <form method="post" action="/deadlines/{{ undo_id }}/undo" hx-post="/deadlines/{{ undo_id }}/undo" hx-target="#cockpit" hx-swap="innerHTML">
+      <button type="submit" class="button-quiet">Rückgängig</button>
+    </form>
+  </div>
+{% endif %}
 {% if deadlines %}
   <ol class="deadlines">
     {% for item in deadlines %}
@@ -18,6 +26,9 @@
             <p class="badge">unter 24 Stunden</p>
           {% endif %}
           <p class="remaining">{{ item.remaining }}</p>
+          <form class="done-form" method="post" action="/deadlines/{{ item.id }}/done" hx-post="/deadlines/{{ item.id }}/done" hx-target="#cockpit" hx-swap="innerHTML">
+            <button type="submit" class="button-quiet">Erledigt</button>
+          </form>
         </div>
       </li>
     {% endfor %}
