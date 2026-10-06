@@ -58,18 +58,15 @@ def make_settings(
     telegram_bot_token: str | None = None,
     telegram_chat_id: str | None = None,
 ) -> Settings:
-    """Build ``Settings`` for tests.
+    """Test apps load fixtures via file://, so the dev flag defaults to on.
 
-    ``allow_local`` is the hook for ``dev_allow_local_feeds`` from PR #9.
-    That field is not on ``Settings`` until #9 lands, and ``file://`` fixtures
-    still load. Callers pass the flag so the rebase only has to wire the field.
-    The default is on, which is what fixture imports need after that merge.
+    Pass `allow_local=False` to exercise the production policy. The value is
+    explicit Settings state, not an environment fallback.
     """
-    if not isinstance(allow_local, bool):
-        raise TypeError("allow_local must be a bool")
     return Settings(
         relax_ical_url=url,
         database_url=f"sqlite:///{tmp_path / 'cockpit.db'}",
+        dev_allow_local_feeds=allow_local,
         reminder_offsets_hours=reminder_offsets_hours,
         telegram_bot_token=telegram_bot_token,
         telegram_chat_id=telegram_chat_id,

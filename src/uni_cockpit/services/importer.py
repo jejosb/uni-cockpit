@@ -18,7 +18,7 @@ from uni_cockpit.feeds.ical import CalendarParseError, parse_icalendar
 from uni_cockpit.feeds.parsed import EventDraft
 from uni_cockpit.feeds.relax import RelaxDeadlineAdapter
 from uni_cockpit.models import CalendarEvent, FeedSource
-from uni_cockpit.services.fetcher import FeedFetchError
+from uni_cockpit.services.fetcher import FeedFetchError, LocalFeedDisabledError
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +75,9 @@ def import_from_configured_url(session: Session, settings: Settings, fetcher) ->
         raise missing_url_error()
     try:
         payload = fetcher.fetch(url)
+    except LocalFeedDisabledError as exc:
+        logger.warning("calendar import rejected a local feed")
+        raise CalendarImportError("local", str(exc)) from None
     except FeedFetchError:
         logger.warning("calendar import failed because the feed could not be loaded")
         raise load_failed_error() from None
