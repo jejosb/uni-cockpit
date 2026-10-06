@@ -1,6 +1,7 @@
 """Server-rendered cockpit. HTMX refreshes the deadline list in place."""
 
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import FastAPI, Form, Request
@@ -22,6 +23,7 @@ from uni_cockpit.services.importer import (
     save_calendar_url,
 )
 from uni_cockpit.services.reminders import (
+    Clock,
     ReminderScheduler,
     build_reminder_scheduler,
     parse_reminder_offsets,
@@ -34,19 +36,32 @@ TEMPLATES = PACKAGE_DIR / "templates"
 STATIC = PACKAGE_DIR / "static"
 
 
+class _StateClock:
+    """Reads whatever clock is currently stored on ``app.state``.
+
+    Scheduling passes ``app.state.clock.now()`` in, and delivery calls this
+    same view, so replacing ``app.state.clock`` cannot leave two clocks behind.
+    """
+
+    def __init__(self, app: FastAPI) -> None:
+        self._app = app
+
+    def now(self) -> datetime:
+        return self._app.state.clock.now()
+
+
 def create_app(
     settings: Settings | None = None,
     *,
     reminders: ReminderScheduler | None = None,
+    clock: Clock | None = None,
 ) -> FastAPI:
     configure_logging()
     settings = settings or Settings()
     engine = create_db_engine(settings.database_url)
     init_db(engine)
-    clock = SystemClock()
+    clock = clock or SystemClock()
     offsets = parse_reminder_offsets(settings.reminder_offsets_hours)
-    if reminders is None:
-        reminders = build_reminder_scheduler(settings, engine, clock, offsets)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -72,6 +87,8 @@ def create_app(
     app.state.engine = engine
     app.state.fetcher = UrlCalendarFetcher()
     app.state.clock = clock
+    if reminders is None:
+        reminders = build_reminder_scheduler(settings, engine, _StateClock(app), offsets)
     app.state.reminders = reminders
     app.state.reminder_offsets = offsets
     app.state.import_error = None

@@ -7,11 +7,11 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlmodel import Session
 from telegram.ext import JobQueue
 
 from tests.conftest import FIXTURES, FROZEN_NOW, FixedClock, make_settings, read_fixture
 from uni_cockpit.app import create_app
-from uni_cockpit.config import Settings
 from uni_cockpit.services.deadlines import list_open_deadlines
 from uni_cockpit.services.importer import import_payload
 from uni_cockpit.services.reminders import (
@@ -68,24 +68,55 @@ def test_reminder_times_already_in_the_past_are_dropped():
     assert compute_reminder_times(QUIZ_DUE_UTC, [72, 24], after_the_72h_instant) == [REMINDER_24H]
 
 
-def test_blank_segments_and_order_are_kept_for_valid_offsets(caplog):
-    with caplog.at_level(logging.ERROR):
-        assert parse_reminder_offsets(" 24, 72,24, ") == (24, 72)
-        assert parse_reminder_offsets("72,,24") == (72, 24)
+def test_whitespace_around_offsets_is_ignored_and_order_is_kept(caplog):
+    with caplog.at_level(logging.WARNING):
+        assert parse_reminder_offsets(" 24, 72,24 ") == (24, 72)
     assert caplog.records == []
 
 
 @pytest.mark.parametrize(
     "raw",
-    ["", "   ", "abc", "72,abc", "-1,24", "0", "24.5", "72,0", "+24", "72;24"],
+    [
+        "",
+        "   ",
+        "abc",
+        "72,abc",
+        "-1,24",
+        "0",
+        "24.5",
+        "72,0",
+        "+24",
+        "72;24",
+        "²",
+        "100000000",
+        "721",
+        "-1",
+        "72,,24",
+    ],
 )
 def test_invalid_offsets_fall_back_to_the_default(raw, caplog):
-    with caplog.at_level(logging.ERROR):
+    with caplog.at_level(logging.WARNING):
         parsed = parse_reminder_offsets(raw)
     assert parsed == DEFAULT_REMINDER_OFFSETS
+    assert caplog.records
+    assert all(record.levelno == logging.WARNING for record in caplog.records)
     assert "invalid" in caplog.text.lower()
     assert "72,24" in caplog.text
     assert raw in caplog.text
+
+
+def test_offset_of_720_hours_is_accepted(caplog):
+    with caplog.at_level(logging.WARNING):
+        assert parse_reminder_offsets("720") == (720,)
+        assert parse_reminder_offsets("1") == (1,)
+    assert caplog.records == []
+    times = compute_reminder_times(QUIZ_DUE_UTC, [720], BEFORE_BOTH)
+    assert times == [QUIZ_DUE_UTC - timedelta(hours=720)]
+
+
+def test_overflowing_offset_does_not_escape_compute():
+    assert compute_reminder_times(QUIZ_DUE_UTC, [100000000], BEFORE_BOTH) == []
+    assert compute_reminder_times(QUIZ_DUE_UTC, [100000000, 24], BEFORE_BOTH) == [REMINDER_24H]
 
 
 def test_jobqueue_schedules_only_future_reminder_times(session):
@@ -278,7 +309,7 @@ def test_app_starts_without_telegram_and_does_not_call_the_bot(tmp_path, caplog,
 
     monkeypatch.setattr("uni_cockpit.services.reminders.build_telegram_application", forbid_build)
     monkeypatch.setattr("telegram.Bot.initialize", forbid_initialize)
-    settings = _settings(tmp_path, token=None, chat_id=None, offsets="72,24")
+    settings = make_settings(tmp_path, None)
     with caplog.at_level(logging.WARNING):
         application = create_app(settings)
         with TestClient(application) as client:
@@ -295,7 +326,12 @@ def test_missing_chat_id_disables_reminders_without_building_a_bot(tmp_path, cap
         raise AssertionError(token)
 
     monkeypatch.setattr("uni_cockpit.services.reminders.build_telegram_application", forbid_build)
-    settings = _settings(tmp_path, token="123456:TESTTOKEN", chat_id="  ", offsets="72,24")
+    settings = make_settings(
+        tmp_path,
+        None,
+        telegram_bot_token="123456:TESTTOKEN",
+        telegram_chat_id="  ",
+    )
     with caplog.at_level(logging.WARNING):
         application = create_app(settings)
         with TestClient(application) as client:
@@ -305,15 +341,21 @@ def test_missing_chat_id_disables_reminders_without_building_a_bot(tmp_path, cap
     assert "TELEGRAM_BOT_TOKEN is not set" not in caplog.text
 
 
-def test_invalid_offsets_do_not_crash_the_app(tmp_path, caplog):
-    settings = _settings(tmp_path, token=None, chat_id=None, offsets="72,soon")
-    with caplog.at_level(logging.ERROR):
+@pytest.mark.parametrize("raw", ["72,soon", "²", "100000000", "721", "72,,24"])
+def test_invalid_offsets_do_not_crash_the_app(tmp_path, caplog, raw):
+    settings = make_settings(tmp_path, None, reminder_offsets_hours=raw)
+    with caplog.at_level(logging.WARNING):
         application = create_app(settings)
         with TestClient(application) as client:
             response = client.get("/")
     assert response.status_code == 200
     assert application.state.reminder_offsets == (72, 24)
-    assert "REMINDER_OFFSETS_HOURS='72,soon' is invalid. Using the default 72,24." in caplog.text
+    offset_logs = [
+        record for record in caplog.records if "REMINDER_OFFSETS_HOURS" in record.getMessage()
+    ]
+    assert len(offset_logs) == 1
+    assert offset_logs[0].levelno == logging.WARNING
+    assert f"REMINDER_OFFSETS_HOURS={raw!r} is invalid. Using the default 72,24." in caplog.text
 
 
 def test_import_reschedules_jobs_without_duplicating_them(tmp_path, monkeypatch):
@@ -326,12 +368,12 @@ def test_import_reschedules_jobs_without_duplicating_them(tmp_path, monkeypatch)
         return application
 
     monkeypatch.setattr("uni_cockpit.services.reminders.build_telegram_application", build)
-    settings = _settings(
+    settings = make_settings(
         tmp_path,
-        token="123456:TESTTOKEN",
-        chat_id="4242",
-        offsets="72,24",
-        url=FIXTURES.joinpath("relax_deadlines.ics").resolve().as_uri(),
+        FIXTURES.joinpath("relax_deadlines.ics").resolve().as_uri(),
+        allow_local=True,
+        telegram_bot_token="123456:TESTTOKEN",
+        telegram_chat_id="4242",
     )
     application = create_app(settings)
     application.state.clock = FixedClock(FROZEN_NOW)
@@ -347,6 +389,42 @@ def test_import_reschedules_jobs_without_duplicating_them(tmp_path, monkeypatch)
         assert len(queue.jobs()) == len(first)
 
 
+def test_restart_between_72h_and_24h_schedules_only_the_24h_reminder(tmp_path, monkeypatch):
+    created: list[_FakeApplication] = []
+
+    def build(token):
+        assert token == "123456:TESTTOKEN"
+        application = _FakeApplication()
+        created.append(application)
+        return application
+
+    monkeypatch.setattr("uni_cockpit.services.reminders.build_telegram_application", build)
+    between = datetime(2026, 10, 24, 12, 0, tzinfo=UTC)
+    assert REMINDER_72H < between < REMINDER_24H
+    settings = make_settings(
+        tmp_path,
+        FIXTURES.joinpath("relax_deadlines.ics").resolve().as_uri(),
+        allow_local=True,
+        telegram_bot_token="123456:TESTTOKEN",
+        telegram_chat_id="4242",
+    )
+    application = create_app(settings)
+    application.state.clock = FixedClock(between)
+    with TestClient(application) as client:
+        assert client.get("/").status_code == 200
+        queue = created[0].job_queue
+        with Session(application.state.engine, expire_on_commit=False) as session:
+            quiz = _event_named(session, between, "Quiz")
+        quiz_jobs = [job for job in queue.jobs() if job.data["event_id"] == quiz.id]
+        assert [job.job.trigger.run_date for job in quiz_jobs] == [REMINDER_24H]
+        assert all(job.job.trigger.run_date != REMINDER_72H for job in queue.jobs())
+
+        asyncio.run(quiz_jobs[0].callback(_context(quiz_jobs[0].data, created[0].bot)))
+
+    assert len(created[0].bot.messages) == 1
+    assert "noch 1 Tag 23 Std." in created[0].bot.messages[0][1]
+
+
 def test_a_rejected_token_disables_reminders_without_leaking_it(tmp_path, caplog, monkeypatch):
     secret = "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
@@ -355,7 +433,12 @@ def test_a_rejected_token_disables_reminders_without_leaking_it(tmp_path, caplog
         return _FakeApplication(fail=RuntimeError(f"The token `{secret}` was rejected"))
 
     monkeypatch.setattr("uni_cockpit.services.reminders.build_telegram_application", build)
-    settings = _settings(tmp_path, token=secret, chat_id="4242", offsets="72,24")
+    settings = make_settings(
+        tmp_path,
+        None,
+        telegram_bot_token=secret,
+        telegram_chat_id="4242",
+    )
     with caplog.at_level(logging.DEBUG):
         application = create_app(settings)
         with TestClient(application) as client:
@@ -421,8 +504,6 @@ def _run_dates(queue: JobQueue) -> list[datetime]:
 
 
 def _expected_dates(application, now: datetime) -> list[datetime]:
-    from sqlmodel import Session
-
     with Session(application.state.engine, expire_on_commit=False) as session:
         expected: list[datetime] = []
         for event in list_open_deadlines(session, now):
@@ -430,17 +511,6 @@ def _expected_dates(application, now: datetime) -> list[datetime]:
                 compute_reminder_times(event.due_at, application.state.reminder_offsets, now)
             )
     return sorted(expected)
-
-
-def _settings(tmp_path, *, token, chat_id, offsets, url=None):
-    return Settings(
-        relax_ical_url=url,
-        database_url=f"sqlite:///{tmp_path / 'cockpit.db'}",
-        reminder_offsets_hours=offsets,
-        telegram_bot_token=token,
-        telegram_chat_id=chat_id,
-        _env_file=None,
-    )
 
 
 def test_make_settings_helper_stays_offline(tmp_path):

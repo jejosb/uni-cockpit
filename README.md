@@ -47,9 +47,11 @@ cp .env.example .env
 
 Put the export URL in `.env` as `RELAX_ICAL_URL`. You can also leave that variable empty and paste the URL on the Kalender page. The page stores it in `data/cockpit.db`, which is git-ignored. When both are set, the environment variable wins.
 
-`REMINDER_OFFSETS_HOURS` defaults to `72,24` (3 days and 24 hours before the due instant). Each value is a number of real elapsed UTC hours. An invalid value is logged and the app falls back to `72,24` instead of exiting.
+`REMINDER_OFFSETS_HOURS` defaults to `72,24` (3 days and 24 hours before the due instant). Each value is a whole number of real elapsed UTC hours from 1 to 720 (30 days). If any entry is invalid, the app logs a warning and falls back to `72,24` instead of exiting.
 
 Telegram needs `TELEGRAM_BOT_TOKEN` (from @BotFather) and `TELEGRAM_CHAT_ID` (the chat that should receive the messages). Leave either one empty and the cockpit still starts; the log says reminders are disabled. The bot is only used to send messages. Polling for commands is not started. The token and chat id are never written to the database and must not be committed.
+
+The app must run as a single process (one uvicorn worker; do not pass `--workers` greater than 1), otherwise each worker sends the same reminder again.
 
 Try the app on the sample feed, without RELAX:
 

@@ -49,12 +49,29 @@ def session(engine):
         yield db_session
 
 
-def make_settings(tmp_path, url: str | None) -> Settings:
+def make_settings(
+    tmp_path,
+    url: str | None,
+    *,
+    allow_local: bool = True,
+    reminder_offsets_hours: str = "72,24",
+    telegram_bot_token: str | None = None,
+    telegram_chat_id: str | None = None,
+) -> Settings:
+    """Build ``Settings`` for tests.
+
+    ``allow_local`` is the hook for ``dev_allow_local_feeds`` from PR #9.
+    That field is not on ``Settings`` until #9 lands, and ``file://`` fixtures
+    still load. Callers pass the flag so the rebase only has to wire the field.
+    The default is on, which is what fixture imports need after that merge.
+    """
+    if not isinstance(allow_local, bool):
+        raise TypeError("allow_local must be a bool")
     return Settings(
         relax_ical_url=url,
         database_url=f"sqlite:///{tmp_path / 'cockpit.db'}",
-        reminder_offsets_hours="72,24",
-        telegram_bot_token=None,
-        telegram_chat_id=None,
+        reminder_offsets_hours=reminder_offsets_hours,
+        telegram_bot_token=telegram_bot_token,
+        telegram_chat_id=telegram_chat_id,
         _env_file=None,
     )

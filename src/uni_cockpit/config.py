@@ -2,9 +2,10 @@
 
 Secrets stay in the environment or the local database. Bot token and chat id
 are read only from ``TELEGRAM_BOT_TOKEN`` and ``TELEGRAM_CHAT_ID``.
-``reminder_offsets_hours`` is the raw ``REMINDER_OFFSETS_HOURS`` string;
-parsing (and the fallback to 72,24) lives in ``services.reminders``. Offsets
-are elapsed UTC hours (see the README section "Time handling").
+``reminder_offsets_hours`` is the raw ``REMINDER_OFFSETS_HOURS`` string.
+Parsing accepts whole ASCII hours from 1 to 720 and otherwise falls back to
+72,24 (see ``services.reminders``). Offsets are elapsed UTC hours (see the
+README section "Time handling").
 """
 
 from pydantic import Field

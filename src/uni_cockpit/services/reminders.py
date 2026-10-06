@@ -28,6 +28,9 @@ from uni_cockpit.timeutil import ensure_utc, format_due_local, format_remaining
 logger = logging.getLogger(__name__)
 
 DEFAULT_REMINDER_OFFSETS: tuple[int, ...] = (72, 24)
+# Whole elapsed UTC hours. 720 is 30 days, the largest offset the product allows.
+_MIN_OFFSET_HOURS = 1
+_MAX_OFFSET_HOURS = 720
 REMINDER_JOB_PREFIX = "deadline-reminder:"
 
 ReminderCallback = Callable[..., Awaitable[None]]
@@ -57,12 +60,23 @@ def compute_reminder_times(
     that crosses the October daylight-saving change lands one hour differently
     on a Berlin clock. Instants at or before ``now_utc`` are omitted.
     """
-    deadline = ensure_utc(deadline_utc)
-    now = ensure_utc(now_utc)
+    try:
+        deadline = ensure_utc(deadline_utc)
+        now = ensure_utc(now_utc)
+    except (TypeError, ValueError, OverflowError, OSError):
+        logger.warning("Could not compute reminder times. No instants were returned.")
+        return []
     times: list[datetime] = []
     seen: set[datetime] = set()
     for hours in offsets_hours:
-        when = deadline - timedelta(hours=hours)
+        try:
+            when = deadline - timedelta(hours=hours)
+        except (TypeError, ValueError, OverflowError, OSError):
+            logger.warning(
+                "Skipping reminder offset %r because it is not a usable hour count.",
+                hours,
+            )
+            continue
         if when <= now or when in seen:
             continue
         seen.add(when)
@@ -72,17 +86,34 @@ def compute_reminder_times(
 
 
 def parse_reminder_offsets(raw: str | None) -> tuple[int, ...]:
-    """Parse ``REMINDER_OFFSETS_HOURS``. Invalid input logs an error and uses 72,24."""
+    """Parse ``REMINDER_OFFSETS_HOURS``.
+
+    Each entry must be a whole ASCII integer from 1 to 720 inclusive (30 days).
+    ``isdigit`` is not enough: characters such as ``²`` pass it and then make
+    ``int`` raise. If any entry is missing or invalid, log a warning and use
+    72,24 for the whole list. Parsing does not raise.
+    """
     if raw is None:
         return DEFAULT_REMINDER_OFFSETS
-    parts = [part.strip() for part in raw.split(",")]
-    parts = [part for part in parts if part]
-    if not parts or any(not part.isdigit() or int(part) <= 0 for part in parts):
-        logger.error("REMINDER_OFFSETS_HOURS=%r is invalid. Using the default 72,24.", raw)
+    try:
+        return _parse_offset_list(raw)
+    except Exception:
+        logger.warning("REMINDER_OFFSETS_HOURS=%r is invalid. Using the default 72,24.", raw)
         return DEFAULT_REMINDER_OFFSETS
+
+
+def _parse_offset_list(raw: str) -> tuple[int, ...]:
+    parts = [part.strip() for part in raw.split(",")]
+    if not parts:
+        raise ValueError(raw)
     offsets: list[int] = []
     for part in parts:
+        # ASCII digits only. ``str.isdigit`` is true for ``²``, and ``int`` then raises.
+        if re.fullmatch(r"[0-9]+", part) is None:
+            raise ValueError(part)
         value = int(part)
+        if value < _MIN_OFFSET_HOURS or value > _MAX_OFFSET_HOURS:
+            raise ValueError(part)
         if value not in offsets:
             offsets.append(value)
     return tuple(offsets)
@@ -169,7 +200,15 @@ def reschedule_reminders(
     for event in list_open_deadlines(session, moment):
         if event.id is None:
             continue
-        for when in compute_reminder_times(event.due_at, offsets_hours, moment):
+        try:
+            upcoming = compute_reminder_times(event.due_at, offsets_hours, moment)
+        except Exception:
+            logger.warning(
+                "Could not compute reminders for deadline %s. That deadline was skipped.",
+                event.id,
+            )
+            continue
+        for when in upcoming:
             job_queue.run_once(
                 callback,
                 when=when,
@@ -198,7 +237,12 @@ class DisabledReminderScheduler:
 
 
 class TelegramReminderScheduler:
-    """Starts a bot without polling and lets its JobQueue own the schedule."""
+    """Starts a bot without polling and lets its JobQueue own the schedule.
+
+    ``clock.now()`` is called when a job runs. ``create_app`` passes a clock
+    that reads ``app.state.clock``, so the schedule and the remaining-time
+    text use that one clock.
+    """
 
     def __init__(
         self,
