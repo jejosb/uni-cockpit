@@ -1,13 +1,16 @@
 """An existing cockpit.db from before the source column still opens."""
 
 import sqlite3
+from datetime import UTC, datetime
 
+import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy.engine import Connection
 from sqlmodel import Session, select
 
 from tests.conftest import FROZEN_NOW, FixedClock, make_settings
 from uni_cockpit.app import create_app
-from uni_cockpit.db import init_db
+from uni_cockpit.db import create_db_engine, init_db
 from uni_cockpit.models import CalendarEvent
 
 _OLD_SCHEMA = """
@@ -51,7 +54,7 @@ CREATE INDEX ix_calendar_events_is_done ON calendar_events (is_done);
 """
 
 
-def _write_old_db(path) -> None:
+def _write_old_db(path, *, is_done: int = 0, done_at: str | None = None) -> None:
     connection = sqlite3.connect(path)
     connection.executescript(_OLD_SCHEMA)
     connection.execute(
@@ -61,13 +64,15 @@ def _write_old_db(path) -> None:
     )
     connection.execute(
         "INSERT INTO calendar_events ("
-        "id, source_id, uid, kind, title, course, starts_at, due_at, all_day, is_done, "
+        "id, source_id, uid, kind, title, course, starts_at, due_at, all_day, is_done, done_at, "
         "created_at, updated_at"
-        ") VALUES (1, 1, ?, 'deadline', 'Legacy worksheet', 'ALG', ?, ?, 0, 0, ?, ?)",
+        ") VALUES (1, 1, ?, 'deadline', 'Legacy worksheet', 'ALG', ?, ?, 0, ?, ?, ?, ?)",
         (
             "evt-legacy@calendar.example.edu",
             "2026-10-08 16:00:00",
             "2026-10-08 16:00:00",
+            is_done,
+            done_at,
             "2026-10-01 08:00:00",
             "2026-10-01 08:00:00",
         ),
@@ -137,3 +142,57 @@ def test_old_database_migrates_source_sync_status_and_the_uid_key(tmp_path):
             "hisinone": "HISinOne exam",
         }
         assert all(row.removed_at is None for row in stored)
+
+
+def _unique_keys(engine) -> list[list[str]]:
+    with engine.connect() as connection:
+        indexes = connection.exec_driver_sql("PRAGMA index_list(calendar_events)").fetchall()
+        unique_keys = []
+        for row in indexes:
+            if not row[2]:
+                continue
+            info = connection.exec_driver_sql(f'PRAGMA index_info("{row[1]}")').fetchall()
+            unique_keys.append([item[2] for item in sorted(info, key=lambda item: item[0])])
+    return unique_keys
+
+
+def test_aborted_rebuild_retries_and_keeps_the_done_deadline(tmp_path, monkeypatch):
+    """A failure immediately after CREATE of calendar_events_new must not brick startup."""
+    path = tmp_path / "cockpit.db"
+    done_at = "2026-10-02 09:00:00"
+    _write_old_db(path, is_done=1, done_at=done_at)
+    settings = make_settings(tmp_path, None)
+    real_execute = Connection.exec_driver_sql
+
+    def execute(self, statement, *args, **kwargs):
+        result = real_execute(self, statement, *args, **kwargs)
+        if isinstance(statement, str) and "CREATE TABLE calendar_events_new" in statement:
+            raise RuntimeError("migration aborted after CREATE")
+        return result
+
+    monkeypatch.setattr(Connection, "exec_driver_sql", execute)
+    engine = create_db_engine(settings.database_url)
+    with pytest.raises(RuntimeError, match="migration aborted after CREATE"):
+        init_db(engine)
+    engine.dispose()
+    monkeypatch.undo()
+
+    application = create_app(settings)
+    application.state.clock = FixedClock(FROZEN_NOW)
+    with TestClient(application) as client:
+        assert client.get("/").status_code == 200
+
+    with Session(application.state.engine, expire_on_commit=False) as session:
+        legacy = session.exec(select(CalendarEvent)).one()
+        assert legacy.title == "Legacy worksheet"
+        assert legacy.is_done is True
+        assert legacy.done_at == datetime(2026, 10, 2, 9, 0, tzinfo=UTC)
+
+    assert _unique_keys(application.state.engine) == [["source", "uid"]]
+    init_db(application.state.engine)
+    assert _unique_keys(application.state.engine) == [["source", "uid"]]
+    with Session(application.state.engine, expire_on_commit=False) as session:
+        again = session.exec(select(CalendarEvent)).one()
+        assert again.is_done is True
+        assert again.done_at == datetime(2026, 10, 2, 9, 0, tzinfo=UTC)
+        assert again.title == "Legacy worksheet"

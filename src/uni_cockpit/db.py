@@ -1,5 +1,6 @@
 """SQLite engine helpers. The database file stays outside git."""
 
+import contextlib
 from pathlib import Path
 
 from sqlalchemy import DateTime
@@ -53,6 +54,10 @@ def _migrate_sqlite(engine: Engine) -> None:
     """Add columns that ``create_all`` does not add to an existing file.
 
     Safe to run on every startup and on a database that already has the columns.
+    Column adds commit on their own. Rebuilding ``calendar_events`` uses a
+    separate explicit transaction: pysqlite only opens a transaction at the
+    first INSERT, so ``CREATE TABLE`` inside ``engine.begin()`` is already
+    committed and a later failure would leave ``calendar_events_new`` behind.
     """
     with engine.begin() as connection:
         event_columns = _column_names(connection, "calendar_events")
@@ -60,11 +65,6 @@ def _migrate_sqlite(engine: Engine) -> None:
             connection.exec_driver_sql(
                 "ALTER TABLE calendar_events ADD COLUMN source VARCHAR NOT NULL DEFAULT 'relax'"
             )
-        if not _events_unique_on_source_and_uid(connection):
-            _rebuild_events_table(connection)
-        connection.exec_driver_sql(
-            "CREATE INDEX IF NOT EXISTS ix_calendar_events_source ON calendar_events (source)"
-        )
         source_columns = _column_names(connection, "feed_sources")
         if "last_sync_at" not in source_columns:
             connection.exec_driver_sql("ALTER TABLE feed_sources ADD COLUMN last_sync_at DATETIME")
@@ -74,6 +74,14 @@ def _migrate_sqlite(engine: Engine) -> None:
             )
         if "last_sync_message" not in source_columns:
             connection.exec_driver_sql("ALTER TABLE feed_sources ADD COLUMN last_sync_message TEXT")
+
+    with engine.connect() as connection:
+        if not _events_unique_on_source_and_uid(connection):
+            _rebuild_events_table(connection)
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_calendar_events_source ON calendar_events (source)"
+        )
+        connection.commit()
 
 
 def _events_unique_on_source_and_uid(connection) -> bool:
@@ -90,7 +98,23 @@ def _rebuild_events_table(connection) -> None:
     that index cannot be dropped. Older files unique ``(source_id, uid)``.
     RELAX and HISinOne can emit the same UID, so the table is copied.
     ``source`` is already ``'relax'`` for every existing row.
+
+    ``BEGIN IMMEDIATE`` wraps the copy. ``DROP TABLE IF EXISTS`` first, so a
+    retry still works when an earlier attempt committed ``calendar_events_new``
+    and then stopped before replacing ``calendar_events``.
     """
+    connection.exec_driver_sql("BEGIN IMMEDIATE")
+    try:
+        _rebuild_events_table_in_transaction(connection)
+        connection.exec_driver_sql("COMMIT")
+    except Exception:
+        with contextlib.suppress(Exception):
+            connection.exec_driver_sql("ROLLBACK")
+        raise
+
+
+def _rebuild_events_table_in_transaction(connection) -> None:
+    connection.exec_driver_sql("DROP TABLE IF EXISTS calendar_events_new")
     connection.exec_driver_sql(
         """
         CREATE TABLE calendar_events_new (
@@ -146,6 +170,9 @@ def _rebuild_events_table(connection) -> None:
     )
     connection.exec_driver_sql(
         "CREATE INDEX IF NOT EXISTS ix_calendar_events_is_done ON calendar_events (is_done)"
+    )
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS ix_calendar_events_source ON calendar_events (source)"
     )
 
 

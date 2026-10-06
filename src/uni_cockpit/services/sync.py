@@ -13,6 +13,7 @@ unchanged. After a successful import the caller reschedules reminders.
 import asyncio
 import logging
 import re
+from collections.abc import Callable
 from datetime import datetime, timedelta
 
 from fastapi import FastAPI
@@ -20,6 +21,7 @@ from sqlmodel import Session
 
 from uni_cockpit.services.importer import (
     CalendarImportError,
+    ImportResult,
     effective_calendar_url,
     import_from_configured_url,
 )
@@ -168,17 +170,29 @@ def import_blocking(app: FastAPI, now: datetime):
         )
 
 
-async def run_serialized_import(app: FastAPI, *, reschedule_preserved: bool = False):
+async def run_serialized_import(
+    app: FastAPI,
+    import_fn: Callable[[FastAPI, datetime], ImportResult | None] | None = None,
+    *,
+    reschedule_preserved: bool = False,
+) -> ImportResult | None:
     """Import while holding ``app.state.import_lock``, then reschedule.
+
+    ``import_fn`` replaces the RELAX import. It is called as
+    ``import_fn(app, now)`` in a worker thread and returns an ``ImportResult``,
+    or ``None`` when there is nothing to reschedule. The default is
+    ``import_blocking``. A second feed uses the same lock by passing its own
+    function here.
 
     An empty feed that keeps existing deadlines does not reschedule, unless
     ``reschedule_preserved`` is set. Startup uses that flag because the job
     queue is still empty. A later periodic run leaves the existing jobs alone.
     """
+    runner = import_blocking if import_fn is None else import_fn
     async with app.state.import_lock:
         now = app.state.clock.now()
         try:
-            result = await asyncio.to_thread(import_blocking, app, now)
+            result = await asyncio.to_thread(runner, app, now)
         except CalendarImportError:
             raise
         except Exception as exc:

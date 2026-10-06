@@ -31,7 +31,7 @@ from uni_cockpit.feeds.ical import parse_icalendar
 from uni_cockpit.models import CalendarEvent
 from uni_cockpit.services.deadlines import list_open_deadlines, set_deadline_done
 from uni_cockpit.services.fetcher import FeedFetchError, UrlCalendarFetcher
-from uni_cockpit.services.importer import import_payload
+from uni_cockpit.services.importer import ImportResult, import_payload
 from uni_cockpit.services.reminders import (
     TelegramReminderScheduler,
     compute_reminder_times,
@@ -40,7 +40,9 @@ from uni_cockpit.services.reminders import (
 from uni_cockpit.services.sync import (
     DEFAULT_SYNC_INTERVAL_MINUTES,
     parse_sync_interval_minutes,
+    run_serialized_import,
 )
+from uni_cockpit.timeutil import ensure_utc
 
 _EVENT = re.compile(r"BEGIN:VEVENT.*?END:VEVENT\n", re.S)
 LAB_UID = "evt-lab@calendar.example.edu"
@@ -722,6 +724,77 @@ def test_manual_import_and_refresh_do_not_race(tmp_path):
             if job.data["event_id"] == matches[0].id
         )
         assert actual == expected
+
+
+def test_done_during_refresh_keeps_an_exact_reminder_schedule(tmp_path):
+    """Erledigt and a refresh both reschedule. The barrier joins them; no sleep."""
+    application = _app(tmp_path, SECRET_URL, allow_local=False)
+    reminders = _QueueReminders()
+    application.state.reminders = reminders
+    fetcher = _StaticFetcher(read_fixture("relax_deadlines.ics"))
+    application.state.fetcher = fetcher
+    import_reached = threading.Event()
+    release_import = threading.Event()
+    at_reschedule = threading.Barrier(2)
+
+    def fetch(url: str) -> bytes:
+        fetcher.urls.append(url)
+        import_reached.set()
+        assert release_import.wait(timeout=5)
+        return fetcher.payload
+
+    with TestClient(application) as client:
+        lab = _by_uid(application, LAB_UID)
+        original = reminders.reschedule
+
+        def synced(session, *, now):
+            if not release_import.is_set():
+                release_import.set()
+            at_reschedule.wait(timeout=5)
+            return original(session, now=now)
+
+        reminders.reschedule = synced
+        fetcher.fetch = fetch
+        future = client.portal.start_task_soon(application.state.feed_sync.refresh_once)
+        assert import_reached.wait(timeout=5)
+        response = client.post(f"/deadlines/{lab.id}/done")
+        assert future.result(timeout=5) is True
+        assert response.status_code == 200
+
+        stored = _by_uid(application, LAB_UID)
+        assert stored.is_done is True
+        with Session(application.state.engine, expire_on_commit=False) as session:
+            expected = [
+                (event.id, ensure_utc(when))
+                for event in list_open_deadlines(session, FROZEN_NOW)
+                for when in compute_reminder_times(event.due_at, (72, 24), FROZEN_NOW)
+            ]
+        actual = [
+            (job.data["event_id"], ensure_utc(job.job.trigger.run_date))
+            for job in reminders.queue.jobs()
+        ]
+        assert sorted(actual) == sorted(expected)
+        assert len(actual) == len(expected)
+        assert len(actual) == len(set(actual))
+        assert all(event_id != lab.id for event_id, _when in actual)
+
+
+def test_run_serialized_import_calls_the_given_import_fn(tmp_path):
+    application = _app(tmp_path, None)
+    reminders = _QueueReminders()
+    application.state.reminders = reminders
+    seen: list[object] = []
+
+    def custom(app, now):
+        seen.append((app, now))
+        return ImportResult(created=1, updated=0, removed=0, skipped=0)
+
+    with TestClient(application) as client:
+        result = client.portal.call(run_serialized_import, application, custom)
+        assert result is not None
+        assert result.created == 1
+        assert seen == [(application, FROZEN_NOW)]
+        assert list(reminders.queue.jobs()) == []
 
 
 def test_reschedule_error_is_logged_and_the_loop_continues(tmp_path, caplog):

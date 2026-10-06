@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Protocol
 
 
 @dataclass(frozen=True)
@@ -40,3 +41,16 @@ class EventDraft:
     recurrence_rule: str | None
     exception_dates: str | None
     cancelled: bool = False
+
+
+class FeedAdapter(Protocol):
+    """Turns one parsed VEVENT into a draft for a single feed source.
+
+    A second feed implements this structurally. It does not subclass the
+    protocol. ``source_key`` is the ``calendar_events.source`` value, and
+    ``adapt`` maps one ``ParsedEvent`` to an ``EventDraft``.
+    """
+
+    source_key: str
+
+    def adapt(self, event: ParsedEvent) -> EventDraft: ...

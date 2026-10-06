@@ -18,6 +18,7 @@ import asyncio
 import contextlib
 import logging
 import re
+import threading
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime, timedelta
 from typing import Protocol
@@ -200,6 +201,12 @@ async def deliver_reminder(
     )
 
 
+# One lock for every caller of ``reschedule_reminders``, including the test
+# double that does not go through ``TelegramReminderScheduler``. The scheduler
+# takes its own lock first, then this one. Do not acquire them in the other order.
+_reschedule_lock = threading.Lock()
+
+
 def reschedule_reminders(
     session: Session,
     job_queue: JobQueue,
@@ -213,7 +220,29 @@ def reschedule_reminders(
     This is the hook for a re-import and for later edits. The queue receives
     only instants the pure function still considers upcoming, so a reminder
     that was already past at scheduling time is never sent afterwards.
+
+    Clearing the queue and adding the new jobs is one critical section. The
+    web "Erledigt" route runs on a worker thread while a refresh calls this
+    on the event-loop thread.
     """
+    with _reschedule_lock:
+        return _replace_reminder_jobs(
+            session,
+            job_queue,
+            offsets_hours=offsets_hours,
+            now=now,
+            callback=callback,
+        )
+
+
+def _replace_reminder_jobs(
+    session: Session,
+    job_queue: JobQueue,
+    *,
+    offsets_hours: Sequence[int],
+    now: datetime,
+    callback: ReminderCallback,
+) -> int:
     _clear_reminder_jobs(job_queue)
     moment = ensure_utc(now)
     scheduled = 0
@@ -279,6 +308,7 @@ class TelegramReminderScheduler:
         self.offsets_hours = tuple(offsets_hours)
         self._engine = engine
         self._clock = clock
+        self._reschedule_lock = threading.Lock()
         self._application: Application | None = None
         self._polling_task: asyncio.Task[None] | None = None
 
@@ -392,16 +422,18 @@ class TelegramReminderScheduler:
             await task
 
     def reschedule(self, session: Session, *, now: datetime) -> int:
-        application = self._application
-        if application is None or application.job_queue is None:
-            return 0
-        return reschedule_reminders(
-            session,
-            application.job_queue,
-            offsets_hours=self.offsets_hours,
-            now=now,
-            callback=self.send_reminder,
-        )
+        """Replace reminder jobs. Callers from the web thread and the loop share one lock."""
+        with self._reschedule_lock:
+            application = self._application
+            if application is None or application.job_queue is None:
+                return 0
+            return reschedule_reminders(
+                session,
+                application.job_queue,
+                offsets_hours=self.offsets_hours,
+                now=now,
+                callback=self.send_reminder,
+            )
 
     async def send_reminder(self, context) -> None:
         await deliver_reminder(

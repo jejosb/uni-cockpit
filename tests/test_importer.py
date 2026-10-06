@@ -14,6 +14,7 @@ from uni_cockpit.models import CalendarEvent, FeedSource
 from uni_cockpit.services.fetcher import FeedFetchError, UrlCalendarFetcher
 from uni_cockpit.services.importer import (
     CalendarImportError,
+    get_or_create_source,
     import_from_configured_url,
     import_payload,
     record_sync_status,
@@ -330,3 +331,28 @@ def test_fixtures_and_example_env_keep_secrets_out_of_band():
     assert "REMINDER_OFFSETS_HOURS=72,24" in example
     assert "YOUR_TOKEN" in example
     assert SECRET_TOKEN not in example
+
+
+def test_import_payload_honors_a_feed_adapter(session):
+    """A second feed passes its own adapter. The class does not subclass the protocol."""
+    get_or_create_source(session, key="hisinone", title="HISinOne")
+
+    class HisinOneAdapter:
+        source_key = "hisinone"
+
+        def adapt(self, event):
+            return replace(RelaxDeadlineAdapter().adapt(event), title=f"HIS {event.summary}")
+
+    result = import_payload(
+        session,
+        read_fixture("relax_deadlines.ics"),
+        adapter=HisinOneAdapter(),
+        now=FROZEN_NOW,
+    )
+    assert result.created > 0
+    rows = list(session.exec(select(CalendarEvent)))
+    assert rows
+    assert {row.source for row in rows} == {"hisinone"}
+    assert all(row.title.startswith("HIS ") for row in rows)
+    source = session.exec(select(FeedSource).where(FeedSource.key == "hisinone")).one()
+    assert source.title == "HISinOne"

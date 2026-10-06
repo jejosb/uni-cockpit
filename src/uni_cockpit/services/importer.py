@@ -20,7 +20,7 @@ from sqlmodel import Session, col, select
 
 from uni_cockpit.config import Settings
 from uni_cockpit.feeds.ical import CalendarParseError, parse_icalendar
-from uni_cockpit.feeds.parsed import EventDraft
+from uni_cockpit.feeds.parsed import EventDraft, FeedAdapter
 from uni_cockpit.feeds.relax import RelaxDeadlineAdapter
 from uni_cockpit.models import CalendarEvent, FeedSource
 from uni_cockpit.services.fetcher import FeedFetchError, LocalFeedDisabledError
@@ -112,7 +112,7 @@ def import_payload(
     session: Session,
     payload: bytes | str,
     *,
-    adapter: RelaxDeadlineAdapter | None = None,
+    adapter: FeedAdapter | None = None,
     now: datetime | None = None,
 ) -> ImportResult:
     adapter = adapter or RelaxDeadlineAdapter()
