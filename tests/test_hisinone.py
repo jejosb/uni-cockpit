@@ -23,7 +23,7 @@ from uni_cockpit.services.importer import (
 )
 from uni_cockpit.services.reminders import reminder_is_current, reschedule_reminders
 from uni_cockpit.services.timetable import lectures_between, week_bounds
-from uni_cockpit.timeutil import ensure_utc
+from uni_cockpit.timeutil import ensure_utc, format_clock_range
 
 SECRET_HIS_TOKEN = "fixture-his-token-not-real"
 SECRET_HIS_URL = f"https://calendar.example.edu/hisinone/timetable.ics?token={SECRET_HIS_TOKEN}"
@@ -182,16 +182,167 @@ def test_empty_feed_keeps_lectures_and_marks_the_timetable_stale(session):
     assert source.timetable_stale is True
 
 
-def test_past_only_feed_is_stale_and_replaces_the_visible_set(session):
+def test_past_only_feed_keeps_lectures_and_marks_the_timetable_stale(session):
     import_timetable_payload(session, read_fixture("hisinone_timetable.ics"), now=FROZEN_NOW)
-    import_timetable_payload(session, read_fixture("hisinone_past.ics"), now=FROZEN_NOW)
+    second = import_timetable_payload(session, read_fixture("hisinone_past.ics"), now=FROZEN_NOW)
 
+    assert second.created == 1
     rows = list(session.exec(select(CalendarEvent)))
-    active = [row for row in rows if row.removed_at is None]
-    assert [row.uid for row in active] == ["his-past@calendar.example.edu"]
-    assert len([row for row in rows if row.removed_at is not None]) == 5
+    assert len(rows) == 6
+    assert all(row.removed_at is None for row in rows)
+    assert any(row.uid == "his-past@calendar.example.edu" for row in rows)
     source = session.exec(select(FeedSource).where(FeedSource.key == "hisinone")).one()
     assert source.timetable_stale is True
+
+
+def test_upcoming_feed_retires_lectures_only_and_relax_leaves_them(session):
+    import_payload(session, read_fixture("relax_deadlines.ics"))
+    import_timetable_payload(session, read_fixture("hisinone_timetable.ics"), now=FROZEN_NOW)
+    deadlines_before = _fingerprint(
+        session.exec(select(CalendarEvent).where(CalendarEvent.kind == "deadline")).all()
+    )
+    hisinone = session.exec(select(FeedSource).where(FeedSource.key == "hisinone")).one()
+    open_uid = "his-open@calendar.example.edu#20261006T081500Z"
+    session.add(
+        CalendarEvent(
+            source_id=hisinone.id,
+            uid=open_uid,
+            kind="deadline",
+            title="Deadline sharing a lecture uid",
+            course="KEEP",
+            description=None,
+            location="Room 9.99",
+            starts_at=FROZEN_NOW,
+            ends_at=None,
+            due_at=FROZEN_NOW,
+            all_day=False,
+            recurrence_rule=None,
+            exception_dates=None,
+            is_done=True,
+            done_at=FROZEN_NOW,
+            removed_at=None,
+            created_at=FROZEN_NOW,
+            updated_at=FROZEN_NOW,
+        )
+    )
+    session.commit()
+
+    import_timetable_payload(session, read_fixture("hisinone_open.ics"), now=FROZEN_NOW)
+
+    shared = session.exec(select(CalendarEvent).where(CalendarEvent.uid == open_uid)).one()
+    deadlines_after = _fingerprint(
+        session.exec(select(CalendarEvent).where(CalendarEvent.kind == "deadline")).all()
+    )
+    assert deadlines_after == sorted(deadlines_before + _fingerprint([shared]))
+    assert shared.kind == "deadline"
+    assert shared.title == "Deadline sharing a lecture uid"
+    assert shared.location == "Room 9.99"
+    assert shared.is_done is True
+    assert shared.removed_at is None
+    previous = [
+        row for row in session.exec(select(CalendarEvent)).all() if row.uid.startswith("his-db@")
+    ]
+    assert previous
+    assert all(row.removed_at is not None for row in previous)
+    seminar = session.exec(
+        select(CalendarEvent).where(CalendarEvent.uid == "his-seminar@calendar.example.edu")
+    ).one()
+    assert seminar.removed_at is not None
+
+    lecture_before = _fingerprint(
+        session.exec(select(CalendarEvent).where(CalendarEvent.kind == "lecture")).all()
+    )
+    lab = session.exec(
+        select(CalendarEvent).where(CalendarEvent.uid == "evt-lab@calendar.example.edu")
+    ).one()
+    lab.kind = "lecture"
+    lab.title = "Planted lecture"
+    lab.location = "Room 8.08"
+    session.add(lab)
+    session.commit()
+
+    renamed = read_fixture("relax_deadlines.ics").replace(
+        b"Lab report is due",
+        b"Lab report renamed",
+    )
+    import_payload(session, renamed)
+
+    planted = session.exec(
+        select(CalendarEvent).where(CalendarEvent.uid == "evt-lab@calendar.example.edu")
+    ).one()
+    assert planted.kind == "lecture"
+    assert planted.title == "Planted lecture"
+    assert planted.location == "Room 8.08"
+    assert planted.removed_at is None
+    lecture_after = _fingerprint(
+        [
+            row
+            for row in session.exec(select(CalendarEvent).where(CalendarEvent.kind == "lecture"))
+            if row.uid != "evt-lab@calendar.example.edu"
+        ]
+    )
+    assert lecture_after == lecture_before
+
+
+def test_exdate_and_recurrence_id_apply_after_the_dst_change():
+    parsed = parse_icalendar(read_fixture("hisinone_dst_exceptions.ics"))
+    drafts = HisinoneTimetableAdapter().adapt_all(parsed.events)
+    by_uid = {draft.uid: draft for draft in drafts}
+    cancelled = "his-cancel@calendar.example.edu#20261103T091500Z"
+    moved_uid = "his-move@calendar.example.edu#20261103T091500Z"
+
+    assert cancelled not in by_uid
+    assert "his-z-cancel@calendar.example.edu#20261103T091500Z" not in by_uid
+    still = by_uid["his-cancel@calendar.example.edu#20261027T091500Z"]
+    assert still.starts_at == datetime(2026, 10, 27, 9, 15, tzinfo=UTC)
+    assert format_clock_range(still.starts_at, still.ends_at) == "10:15–11:45 CET"
+    later = by_uid["his-cancel@calendar.example.edu#20261110T091500Z"]
+    assert later.starts_at == datetime(2026, 11, 10, 9, 15, tzinfo=UTC)
+
+    moved = by_uid[moved_uid]
+    assert moved.starts_at == datetime(2026, 11, 3, 13, 15, tzinfo=UTC)
+    assert moved.ends_at == datetime(2026, 11, 3, 14, 45, tzinfo=UTC)
+    assert moved.location == "Room 3.22"
+    assert format_clock_range(moved.starts_at, moved.ends_at) == "14:15–15:45 CET"
+    zulu_moved = by_uid["his-z-move@calendar.example.edu#20261103T091500Z"]
+    assert zulu_moved.starts_at == datetime(2026, 11, 3, 13, 15, tzinfo=UTC)
+    assert zulu_moved.location == "Room 3.22"
+    assert by_uid["his-move@calendar.example.edu#20261027T091500Z"].location == "Room 3.10"
+
+
+def test_weekly_lecture_keeps_berlin_wall_time_for_every_encoding():
+    parsed = parse_icalendar(read_fixture("hisinone_encodings.ics"))
+    drafts = HisinoneTimetableAdapter().adapt_all(parsed.events)
+    by_uid = {draft.uid: draft for draft in drafts}
+    assert len(drafts) == 20
+    for prefix in ("his-tzid", "his-zulu", "his-float", "his-custom"):
+        before = by_uid[f"{prefix}@calendar.example.edu#20261006T081500Z"]
+        after = by_uid[f"{prefix}@calendar.example.edu#20261027T091500Z"]
+        november = by_uid[f"{prefix}@calendar.example.edu#20261103T091500Z"]
+        assert before.starts_at == datetime(2026, 10, 6, 8, 15, tzinfo=UTC)
+        assert before.ends_at == datetime(2026, 10, 6, 9, 45, tzinfo=UTC)
+        assert after.starts_at == datetime(2026, 10, 27, 9, 15, tzinfo=UTC)
+        assert after.ends_at == datetime(2026, 10, 27, 10, 45, tzinfo=UTC)
+        assert november.starts_at == datetime(2026, 11, 3, 9, 15, tzinfo=UTC)
+        assert format_clock_range(before.starts_at, before.ends_at) == "10:15–11:45 CEST"
+        assert format_clock_range(after.starts_at, after.ends_at) == "10:15–11:45 CET"
+        assert format_clock_range(november.starts_at, november.ends_at) == "10:15–11:45 CET"
+
+
+def _fingerprint(rows: list[CalendarEvent]) -> list[tuple[object, ...]]:
+    return sorted(
+        (
+            row.uid,
+            row.kind,
+            row.title,
+            row.location,
+            row.is_done,
+            ensure_utc(row.starts_at).isoformat(),
+            ensure_utc(row.due_at).isoformat(),
+            None if row.removed_at is None else "removed",
+        )
+        for row in rows
+    )
 
 
 def test_reimport_updates_the_same_occurrence_and_keeps_done(session):

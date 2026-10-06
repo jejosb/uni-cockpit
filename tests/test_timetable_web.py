@@ -118,6 +118,30 @@ def test_lectures_stay_out_of_the_deadline_list(tmp_path):
     assert "noch 2 Tage" not in week.text
 
 
+def test_empty_and_past_only_reloads_keep_lectures_and_ask_to_refresh(tmp_path):
+    url = FIXTURES.joinpath("hisinone_timetable.ics").resolve().as_uri()
+    notice = "Bitte erzeuge den Stundenplan-Link in HISinOne neu"
+    application = _app(tmp_path, url, allow_local=True)
+    with TestClient(application) as client:
+        assert "Databases lecture" in client.get("/stundenplan").text
+        assert notice not in client.get("/").text
+        application.state.fetcher = _StaticFetcher(read_fixture("hisinone_past.ics"))
+        past = client.post("/stundenplan/import", follow_redirects=True)
+        assert notice in past.text
+        assert "Databases lecture" in past.text
+        assert "10:15–11:45 CEST" in past.text
+        home = client.get("/")
+        assert notice in home.text
+        assert "Databases lecture" in home.text
+        application.state.fetcher = _StaticFetcher(read_fixture("hisinone_empty.ics"))
+        empty = client.post("/stundenplan/import", follow_redirects=True)
+
+    assert notice in empty.text
+    assert "Databases lecture" in empty.text
+    assert url not in empty.text
+    assert url not in past.text
+
+
 def test_empty_timetable_asks_to_refresh_the_export_link(tmp_path):
     url = FIXTURES.joinpath("hisinone_empty.ics").resolve().as_uri()
     application = _app(tmp_path, url, allow_local=True)

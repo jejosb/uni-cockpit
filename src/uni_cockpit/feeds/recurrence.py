@@ -4,6 +4,12 @@ The shared parser stores the rule, EXDATE, and RECURRENCE-ID and does not
 expand them. Expansion happens here so a weekly Europe/Berlin lecture keeps
 its wall-clock time across the DST change on 25 October 2026.
 
+The first instant is already UTC. The series is anchored on that instant's
+Europe/Berlin wall time, whether the feed wrote ``TZID=Europe/Berlin``, a
+trailing ``Z``, a floating local time, or a custom ``VTIMEZONE`` name.
+RELAX deadlines are not expanded here, so a Zulu deadline stays on its UTC
+instant.
+
 COUNT/UNTIL are applied by the recurrence rule first. EXDATE then removes
 those occurrences unless a RECURRENCE-ID override puts the slot back at a
 new time. A rule without COUNT or UNTIL is capped so an open-ended feed
@@ -13,12 +19,11 @@ cannot loop forever.
 import logging
 from dataclasses import dataclass
 from datetime import datetime
-from zoneinfo import ZoneInfo
 
 from dateutil.rrule import rrulestr
 
 from uni_cockpit.feeds.parsed import ParsedEvent
-from uni_cockpit.timeutil import ensure_utc
+from uni_cockpit.timeutil import BERLIN, ensure_utc
 
 logger = logging.getLogger(__name__)
 
@@ -121,8 +126,8 @@ def _rule_starts(master: ParsedEvent) -> list[datetime]:
 
 
 def _local_start(master: ParsedEvent) -> datetime:
-    zone = ZoneInfo(master.start_zone or "Europe/Berlin")
-    return ensure_utc(master.starts_at).astimezone(zone)
+    """Berlin wall time of the first UTC instant, for every feed encoding."""
+    return ensure_utc(master.starts_at).astimezone(BERLIN)
 
 
 def _from_master(master: ParsedEvent, start: datetime) -> Occurrence:

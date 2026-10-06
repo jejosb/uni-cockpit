@@ -270,6 +270,9 @@ def _upsert(session: Session, source_key: str, drafts: list[EventDraft]) -> tupl
             session.add(_new_event(source_id, draft, now))
             created += 1
             continue
+        if _row_belongs_to_timetable(existing):
+            # A RELAX fetch must not rewrite a lecture that shares this uid.
+            continue
         _apply_draft(existing, draft, now)
         session.add(existing)
         updated += 1
@@ -314,19 +317,37 @@ def _collect_drafts(
     return [adapter.adapt(event) for event in events]
 
 
+def _row_belongs_to_timetable(row: CalendarEvent) -> bool:
+    """Whether this import may update or retire the row.
+
+    TODO(#13): switch this to ``row.source == "hisinone"`` once
+    ``CalendarEvent.source`` exists. That migration sets existing rows to
+    ``relax`` and adds per-source removal on the RELAX side. Until then
+    ``kind == "lecture"`` is the split: a timetable fetch may only change
+    lectures, and a RELAX fetch must leave them alone.
+    """
+    return row.kind == "lecture"
+
+
 def _upsert_lectures(
     session: Session,
     drafts: list[EventDraft],
     *,
     now: datetime,
 ) -> tuple[int, int]:
-    """Store expanded lectures. An empty feed keeps existing rows and is marked stale."""
+    """Store expanded lectures.
+
+    A feed with no upcoming event, empty or only in the past, keeps every
+    stored row and is marked stale. A feed that still has upcoming lectures
+    retires missing lecture rows only.
+    """
     source = get_or_create_source(session, key="hisinone", title="HISinOne")
     source_id = source.id
     if source_id is None:
         raise RuntimeError("feed source was not persisted")
     created = 0
     updated = 0
+    upcoming = _has_upcoming_lecture(drafts, now)
     if drafts:
         seen: set[str] = set()
         for draft in drafts:
@@ -341,21 +362,26 @@ def _upsert_lectures(
                 session.add(_new_event(source_id, draft, now))
                 created += 1
                 continue
+            if not _row_belongs_to_timetable(existing):
+                continue
             _apply_draft(existing, draft, now)
             existing.removed_at = None
             session.add(existing)
             updated += 1
-        stored = session.exec(
-            select(CalendarEvent).where(CalendarEvent.source_id == source_id)
-        ).all()
-        for row in stored:
-            if row.uid not in seen and row.removed_at is None:
-                row.removed_at = now
-                row.updated_at = now
-                session.add(row)
-        source.timetable_stale = not _has_upcoming_lecture(drafts, now)
-    else:
-        source.timetable_stale = True
+        if upcoming:
+            stored = session.exec(
+                select(CalendarEvent).where(CalendarEvent.source_id == source_id)
+            ).all()
+            for row in stored:
+                if (
+                    _row_belongs_to_timetable(row)
+                    and row.uid not in seen
+                    and row.removed_at is None
+                ):
+                    row.removed_at = now
+                    row.updated_at = now
+                    session.add(row)
+    source.timetable_stale = not upcoming
     source.last_imported_at = now
     source.updated_at = now
     session.add(source)
