@@ -268,7 +268,16 @@ def test_settings_rejects_a_url_without_echoing_it(tmp_path):
 def test_reminder_offset_placeholder_is_configured(monkeypatch):
     monkeypatch.delenv("REMINDER_OFFSETS_HOURS", raising=False)
     monkeypatch.delenv("RELAX_ICAL_URL", raising=False)
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
     settings = Settings(_env_file=None)
     assert settings.reminder_offsets_hours == "72,24"
-    shown = Settings(relax_ical_url=SECRET_URL, _env_file=None)
+    assert settings.telegram_bot_token is None
+    assert settings.telegram_chat_id is None
+    shown = Settings(
+        relax_ical_url=SECRET_URL,
+        telegram_bot_token="123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+        _env_file=None,
+    )
     assert SECRET_TOKEN not in repr(shown)
+    assert "ABCDEFGHIJKLMNOPQRSTUVWXYZ" not in repr(shown)
