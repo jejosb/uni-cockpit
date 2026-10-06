@@ -1,0 +1,184 @@
+import re
+
+from fastapi.testclient import TestClient
+from sqlmodel import Session, select
+
+from tests.conftest import (
+    FIXTURES,
+    FROZEN_NOW,
+    SECRET_TOKEN,
+    SECRET_URL,
+    FixedClock,
+    make_settings,
+    read_fixture,
+)
+from uni_cockpit.app import create_app
+from uni_cockpit.config import Settings
+from uni_cockpit.models import CalendarEvent
+from uni_cockpit.services.fetcher import FeedFetchError
+
+
+def _client(tmp_path, url: str | None, *, payload: bytes | None = None, fail: bool = False):
+    application = create_app(make_settings(tmp_path, url))
+    application.state.clock = FixedClock(FROZEN_NOW)
+    if fail:
+        application.state.fetcher = _FailingFetcher()
+    elif payload is not None:
+        application.state.fetcher = _StaticFetcher(payload)
+    return application
+
+
+class _StaticFetcher:
+    def __init__(self, payload: bytes) -> None:
+        self.payload = payload
+
+    def fetch(self, url: str) -> bytes:
+        return self.payload
+
+
+class _FailingFetcher:
+    def fetch(self, url: str) -> bytes:
+        raise FeedFetchError
+
+
+def _deadline_item(body: str, title: str) -> re.Match[str]:
+    match = re.search(
+        rf'<li class="([^"]+)">(?:(?!</li>).)*{re.escape(title)}(?:(?!</li>).)*</li>',
+        body,
+        re.S,
+    )
+    assert match is not None, title
+    return match
+
+
+def test_open_deadlines_are_sorted_with_course_berlin_time_and_remaining(tmp_path):
+    url = FIXTURES.joinpath("relax_deadlines.ics").resolve().as_uri()
+    application = _client(tmp_path, url)
+    with TestClient(application) as client:
+        response = client.get("/")
+
+    assert response.status_code == 200
+    body = response.text
+    titles = [
+        "Problem sheet is due",
+        "Lab report is due",
+        "Essay draft is due",
+        "Reading notes are due",
+        "Seminar paper is due",
+        "Quiz after the clock change",
+    ]
+    positions = [body.index(title) for title in titles]
+    assert positions == sorted(positions)
+    assert "Expired worksheet is due" not in body
+    assert "noch 2 Tage 4 Std." in body
+    assert "Mo, 26.10.2026, 12:00 CET" in body
+    assert "DBSYS" in body
+    assert "Wissenschaftliches Arbeiten" in body
+    notes = _deadline_item(body, "Reading notes are due")
+    assert "Ohne Kurs" in notes.group(0)
+
+
+def test_done_and_expired_deadlines_stay_out_of_the_open_list(tmp_path):
+    url = FIXTURES.joinpath("relax_deadlines.ics").resolve().as_uri()
+    application = _client(tmp_path, url)
+    with TestClient(application) as client:
+        with Session(application.state.engine, expire_on_commit=False) as session:
+            essay = session.exec(
+                select(CalendarEvent).where(CalendarEvent.uid == "evt-essay@calendar.example.edu")
+            ).one()
+            essay.is_done = True
+            session.add(essay)
+            session.commit()
+            stored = session.exec(select(CalendarEvent)).all()
+        response = client.get("/")
+
+    body = response.text
+    assert "Essay draft is due" not in body
+    assert "Expired worksheet is due" not in body
+    assert "Lab report is due" in body
+    assert any(row.uid == "evt-expired@calendar.example.edu" for row in stored)
+    assert any(row.is_done for row in stored)
+
+
+def test_deadline_within_24_hours_is_highlighted(tmp_path):
+    url = FIXTURES.joinpath("relax_deadlines.ics").resolve().as_uri()
+    application = _client(tmp_path, url)
+    with TestClient(application) as client:
+        body = client.get("/").text
+
+    soon = _deadline_item(body, "Problem sheet is due")
+    later = _deadline_item(body, "Lab report is due")
+    assert "deadline--soon" in soon.group(1)
+    assert "unter 24 Stunden" in soon.group(0)
+    assert "deadline--soon" not in later.group(1)
+    stylesheet = (FIXTURES.parents[1] / "src/uni_cockpit/static/app.css").read_text(
+        encoding="utf-8"
+    )
+    assert ".deadline--soon" in stylesheet
+    assert "#fff1e4" in stylesheet
+
+
+def test_empty_state_when_nothing_is_open(tmp_path):
+    url = FIXTURES.joinpath("empty_calendar.ics").resolve().as_uri()
+    application = _client(tmp_path, url)
+    with TestClient(application) as client:
+        body = client.get("/").text
+
+    assert "Keine offenen Fristen" in body
+    assert "empty-state" in body
+    assert 'class="deadline' not in body
+    assert "<table" not in body
+
+
+def test_failed_reload_keeps_deadlines_and_hides_the_url(tmp_path, caplog):
+    import logging
+
+    application = _client(tmp_path, None, payload=read_fixture("relax_deadlines.ics"))
+    with TestClient(application) as client:
+        saved = client.post("/settings", data={"calendar_url": SECRET_URL}, follow_redirects=True)
+        assert "Lab report is due" in saved.text
+        assert SECRET_TOKEN not in saved.text
+        application.state.fetcher = _FailingFetcher()
+        with caplog.at_level(logging.DEBUG):
+            failed = client.post("/import", follow_redirects=True)
+        settings_page = client.get("/settings")
+
+    assert "konnte nicht geladen" in failed.text
+    assert "Lab report is due" in failed.text
+    assert SECRET_TOKEN not in failed.text
+    assert SECRET_TOKEN not in caplog.text
+    assert SECRET_TOKEN not in settings_page.text
+    assert "authtoken=***" in settings_page.text
+
+
+def test_htmx_import_returns_the_deadline_list(tmp_path):
+    application = _client(tmp_path, None, payload=read_fixture("relax_deadlines.ics"))
+    with TestClient(application) as client:
+        client.post("/settings", data={"calendar_url": SECRET_URL}, follow_redirects=True)
+        partial = client.post("/import", headers={"HX-Request": "true"})
+
+    assert partial.status_code == 200
+    assert "Lab report is due" in partial.text
+    assert "<html" not in partial.text.lower()
+    assert SECRET_TOKEN not in partial.text
+
+
+def test_settings_rejects_a_url_without_echoing_it(tmp_path):
+    application = _client(tmp_path, None)
+    with TestClient(application) as client:
+        response = client.post(
+            "/settings",
+            data={"calendar_url": f"not a url {SECRET_TOKEN}"},
+        )
+    assert response.status_code == 400
+    assert "https://" in response.text
+    assert SECRET_TOKEN not in response.text
+
+
+def test_reminder_offset_placeholder_is_configured(monkeypatch):
+    monkeypatch.delenv("REMINDER_OFFSETS_HOURS", raising=False)
+    monkeypatch.delenv("RELAX_ICAL_URL", raising=False)
+    settings = Settings(_env_file=None)
+    assert settings.reminder_offsets_hours == "72,24"
+    shown = Settings(relax_ical_url=SECRET_URL, _env_file=None)
+    assert SECRET_TOKEN not in repr(shown)

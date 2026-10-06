@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}Kalender-URL · uni-cockpit{% endblock %}
+{% block content %}
+  <section class="page-head">
+    <div>
+      <h1>RELAX-Kalender</h1>
+      <p class="lede">Die URL einmal hinterlegen. Der Import übernimmt Titel, Kurs, Fälligkeit und UID.</p>
+    </div>
+  </section>
+  {% if error %}
+    <p class="banner banner-error" role="alert">{{ error }}</p>
+  {% endif %}
+  {% if notice %}
+    <p class="banner banner-notice" role="status">{{ notice }}</p>
+  {% endif %}
+  <section class="panel">
+    <h2>URL speichern</h2>
+    <p>Die Adresse enthält einen persönlichen Token. Sie bleibt in der lokalen Datenbank oder in <code>RELAX_ICAL_URL</code> und wird nicht ins Log geschrieben.</p>
+    <ol class="steps">
+      <li>In RELAX anmelden.</li>
+      <li>Kalender öffnen und <strong>Import/Export</strong> wählen.</li>
+      <li>Kalender exportieren, den Zeitraum setzen und die URL kopieren.</li>
+    </ol>
+    {% if env_configured %}
+      <p class="hint">Für den Import gilt die Umgebungsvariable <code>RELAX_ICAL_URL</code>. Eine hier gespeicherte URL ist nur der Ersatz, wenn die Variable leer ist.</p>
+    {% endif %}
+    {% if masked_url %}
+      <p class="stored">Aktiv: <code>{{ masked_url }}</code></p>
+    {% endif %}
+    <form method="post" action="/settings">
+      <label for="calendar_url">Neue Kalender-URL</label>
+      <input id="calendar_url" name="calendar_url" type="url" autocomplete="off" spellcheck="false" placeholder="https://relax.reutlingen-university.de/calendar/export_execute.php?…">
+      <button type="submit">Speichern und importieren</button>
+    </form>
+  </section>
+{% endblock %}

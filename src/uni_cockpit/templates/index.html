@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Offene Fristen · uni-cockpit{% endblock %}
+{% block content %}
+  <section class="page-head">
+    <div>
+      <h1>Offene Fristen</h1>
+      <p class="lede">Sortiert nach Fälligkeit. Datum und Uhrzeit in Europe/Berlin.</p>
+    </div>
+    <form method="post" action="/import" hx-post="/import" hx-target="#cockpit" hx-swap="innerHTML">
+      <button type="submit">Jetzt aktualisieren</button>
+    </form>
+  </section>
+  <div id="cockpit">
+    {% include "partials/cockpit.html" %}
+  </div>
+{% endblock %}
