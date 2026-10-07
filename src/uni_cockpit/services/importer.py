@@ -18,6 +18,7 @@ from uni_cockpit.feeds.hisinone import HisinoneTimetableAdapter
 from uni_cockpit.feeds.ical import CalendarParseError, parse_icalendar
 from uni_cockpit.feeds.parsed import EventDraft
 from uni_cockpit.feeds.relax import RelaxDeadlineAdapter
+from uni_cockpit.feeds.timetable_time import attach_feed_clocks
 from uni_cockpit.models import CalendarEvent, FeedSource
 from uni_cockpit.services.fetcher import FeedFetchError, LocalFeedDisabledError
 from uni_cockpit.timeutil import ensure_utc, to_berlin
@@ -173,7 +174,10 @@ def import_payload(
         if adapter.source_key == "hisinone":
             raise timetable_parse_failed_error() from None
         raise parse_failed_error() from None
-    drafts = _collect_drafts(adapter, parsed.events)
+    events = parsed.events
+    if adapter.source_key == "hisinone":
+        events = attach_feed_clocks(payload, events)
+    drafts = _collect_drafts(adapter, events)
     if adapter.source_key == "hisinone":
         created, updated = _upsert_lectures(session, drafts, now=now or _now())
     else:

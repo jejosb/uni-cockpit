@@ -31,6 +31,11 @@ from datetime import datetime
 from dateutil.rrule import rrulestr
 
 from uni_cockpit.feeds.parsed import ParsedEvent
+from uni_cockpit.feeds.timetable_time import (
+    begin_warning_scope,
+    end_warning_scope,
+    resolve_timetable_local,
+)
 from uni_cockpit.timeutil import BERLIN, ensure_utc
 
 logger = logging.getLogger(__name__)
@@ -57,12 +62,16 @@ def expand_events(events: list[ParsedEvent]) -> tuple[list[Occurrence], int]:
     """Return concrete occurrences and how many series could not be expanded."""
     occurrences: list[Occurrence] = []
     skipped = 0
-    for group in _groups(events):
-        try:
-            occurrences.extend(_expand_group(group))
-        except Exception:
-            logger.warning("skipping a timetable recurrence that could not be expanded")
-            skipped += 1
+    scope = begin_warning_scope()
+    try:
+        for group in _groups(events):
+            try:
+                occurrences.extend(_expand_group(group))
+            except Exception:
+                logger.warning("skipping a timetable recurrence that could not be expanded")
+                skipped += 1
+    finally:
+        end_warning_scope(scope)
     return occurrences, skipped
 
 
@@ -166,12 +175,31 @@ def _berlin_occurrence(master: ParsedEvent, raw_start: datetime) -> datetime:
     """Same civil date as the raw instant, at the series' Berlin wall-clock time."""
     wall = _local_start(master)
     local_date = ensure_utc(raw_start).astimezone(BERLIN).date()
-    return datetime.combine(local_date, wall.time(), tzinfo=BERLIN)
+    naive = datetime.combine(local_date, wall.time())
+    return resolve_timetable_local(naive, "Europe/Berlin").astimezone(BERLIN)
 
 
 def _local_start(master: ParsedEvent) -> datetime:
-    """Berlin wall time of the first UTC instant, for every feed encoding."""
-    return ensure_utc(master.starts_at).astimezone(BERLIN)
+    """Berlin wall time of the first instant, for every feed encoding."""
+    return _resolved_utc(master).astimezone(BERLIN)
+
+
+def _resolved_utc(event: ParsedEvent) -> datetime:
+    """Parser instant, unless the timetable clock rules have to reread it."""
+    wall = event.feed_wall
+    if wall is None or not _uses_timetable_clock(event):
+        return ensure_utc(event.starts_at)
+    return resolve_timetable_local(
+        wall,
+        event.feed_tzid,
+        unknown_tzid=event.feed_tzid_unknown,
+    )
+
+
+def _uses_timetable_clock(event: ParsedEvent) -> bool:
+    if event.feed_tzid_unknown or event.feed_tzid is None:
+        return True
+    return event.feed_tzid.casefold() == "europe/berlin"
 
 
 def _from_master(master: ParsedEvent, start: datetime) -> Occurrence:
@@ -187,7 +215,7 @@ def _from_master(master: ParsedEvent, start: datetime) -> Occurrence:
 
 
 def _from_override(master: ParsedEvent, override: ParsedEvent) -> Occurrence:
-    start_utc = ensure_utc(override.starts_at)
+    start_utc = _resolved_utc(override)
     if override.ends_at is not None:
         end = ensure_utc(override.ends_at)
     else:
@@ -204,7 +232,7 @@ def _from_override(master: ParsedEvent, override: ParsedEvent) -> Occurrence:
 
 
 def _plain(event: ParsedEvent, *, suffix: bool) -> Occurrence:
-    start_utc = ensure_utc(event.starts_at)
+    start_utc = _resolved_utc(event)
     original = ensure_utc(event.recurrence_id) if event.recurrence_id else start_utc
     uid = _occurrence_uid(event.uid, original) if suffix else event.uid
     end = ensure_utc(event.ends_at) if event.ends_at is not None else None

@@ -7,8 +7,10 @@ deadlines: `kind` is ``lecture``, so reminder scheduling never sees them.
 
 import re
 
+from uni_cockpit.feeds.ical import parse_icalendar
 from uni_cockpit.feeds.parsed import EventDraft, ParsedEvent
 from uni_cockpit.feeds.recurrence import Occurrence, expand_events
+from uni_cockpit.feeds.timetable_time import attach_feed_clocks
 from uni_cockpit.timeutil import ensure_utc
 
 _GENERIC_CATEGORIES = {
@@ -43,6 +45,13 @@ def timetable_course(categories: tuple[str, ...], description: str | None, summa
                 if course:
                     return course
     return summary.strip()
+
+
+def lecture_drafts(payload: bytes | str) -> list[EventDraft]:
+    """Expand one timetable feed, including its own clock rules."""
+    parsed = parse_icalendar(payload)
+    events = attach_feed_clocks(payload, parsed.events)
+    return HisinoneTimetableAdapter().adapt_all(events)
 
 
 class HisinoneTimetableAdapter:
