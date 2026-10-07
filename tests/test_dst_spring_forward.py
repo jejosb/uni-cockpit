@@ -105,23 +105,22 @@ def test_valid_sibling_of_a_spring_gap_is_stored_at_10_utc(session, fixture):
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "2027-03-28 02:30 Europe/Berlin does not exist (02:00 CET jumps to "
-        "03:00 CEST). The parser stores 2027-03-28 01:30 UTC and "
-        "format_due_local shows 03:30 CEST, with no warning. Story #1: a "
-        "broken civil time must not move the wall clock silently."
+        "2027-03-28 02:30 does not exist in Europe/Berlin. The parser stores "
+        "01:30 UTC and shows 'So, 28.03.2027, 03:30 CEST', but no WARNING is "
+        "logged. see #17"
     ),
 )
-def test_nonexistent_spring_local_time_is_not_silently_shifted(caplog, fixture):
+def test_nonexistent_spring_local_time_shifts_to_0330_and_warns(caplog, fixture):
     with caplog.at_level(logging.WARNING):
         parsed = parse_icalendar(read_fixture(fixture))
-    gap = next((event for event in parsed.events if event.uid == GAP_UID), None)
-    if gap is None:
-        assert parsed.skipped
-        assert caplog.records
-        return
-    displayed = format_due_local(gap.starts_at)
-    if "02:30" not in displayed:
-        assert caplog.records, displayed
+
+    gap = next(event for event in parsed.events if event.uid == GAP_UID)
+    assert gap.starts_at == datetime(2027, 3, 28, 1, 30, tzinfo=UTC)
+    assert format_due_local(gap.starts_at) == "So, 28.03.2027, 03:30 CEST"
+    assert all(GAP_UID not in reason for reason in parsed.skipped)
+    sibling = next(event for event in parsed.events if event.uid == OK_UID)
+    assert sibling.starts_at == SPRING_DUE
+    assert any(record.levelno == logging.WARNING for record in caplog.records)
 
 
 @pytest.mark.parametrize(
