@@ -55,29 +55,55 @@ def lecture_drafts(payload: bytes | str) -> list[EventDraft]:
 
 
 class HisinoneTimetableAdapter:
+    """FeedAdapter for the HISinOne timetable. ``source_key`` is ``hisinone``.
+
+    ``adapt`` maps one parsed event to one lecture draft. ``adapt_all`` expands
+    a weekly series first, then calls ``adapt`` for each occurrence.
+    """
+
     source_key = "hisinone"
     kind = "lecture"
 
     def __init__(self) -> None:
         self.skipped = 0
 
+    def adapt(self, event: ParsedEvent) -> EventDraft:
+        exceptions = ",".join(ensure_utc(moment).isoformat() for moment in event.exception_dates)
+        return EventDraft(
+            uid=event.uid,
+            kind=self.kind,
+            title=event.summary,
+            course=timetable_course(event.categories, event.description, event.summary),
+            description=event.description,
+            location=event.location,
+            starts_at=ensure_utc(event.starts_at),
+            ends_at=ensure_utc(event.ends_at) if event.ends_at is not None else None,
+            due_at=ensure_utc(event.starts_at),
+            all_day=event.all_day,
+            recurrence_rule=event.recurrence_rule,
+            exception_dates=exceptions or None,
+            cancelled=_is_cancelled(event.status),
+        )
+
     def adapt_all(self, events: list[ParsedEvent]) -> list[EventDraft]:
         occurrences, self.skipped = expand_events(events)
-        return [self._draft(item) for item in occurrences]
+        return [self.adapt(_as_parsed(item)) for item in occurrences]
 
-    def _draft(self, item: Occurrence) -> EventDraft:
-        exceptions = ",".join(ensure_utc(moment).isoformat() for moment in item.exception_dates)
-        return EventDraft(
-            uid=item.uid,
-            kind=self.kind,
-            title=item.title,
-            course=timetable_course(item.categories, item.description, item.title),
-            description=item.description,
-            location=item.location,
-            starts_at=ensure_utc(item.starts_at),
-            ends_at=ensure_utc(item.ends_at) if item.ends_at is not None else None,
-            due_at=ensure_utc(item.starts_at),
-            all_day=item.all_day,
-            recurrence_rule=item.recurrence_rule,
-            exception_dates=exceptions or None,
-        )
+
+def _as_parsed(item: Occurrence) -> ParsedEvent:
+    return ParsedEvent(
+        uid=item.uid,
+        summary=item.title,
+        description=item.description,
+        location=item.location,
+        categories=item.categories,
+        starts_at=item.starts_at,
+        ends_at=item.ends_at,
+        all_day=item.all_day,
+        recurrence_rule=item.recurrence_rule,
+        exception_dates=item.exception_dates,
+    )
+
+
+def _is_cancelled(status: str | None) -> bool:
+    return status is not None and status.strip().upper() == "CANCELLED"

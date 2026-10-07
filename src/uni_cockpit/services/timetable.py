@@ -86,6 +86,7 @@ def resolve_week(raw: str | None, now: datetime) -> date:
 def lectures_between(session: Session, start: datetime, end: datetime) -> list[CalendarEvent]:
     rows = session.exec(
         select(CalendarEvent)
+        .where(CalendarEvent.source == "hisinone")
         .where(CalendarEvent.kind == "lecture")
         .where(col(CalendarEvent.removed_at).is_(None))
     ).all()

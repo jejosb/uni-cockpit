@@ -1,19 +1,21 @@
 """Server-rendered cockpit. HTMX refreshes the deadline list in place."""
 
+import asyncio
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from uni_cockpit.config import Settings
 from uni_cockpit.db import create_db_engine, init_db
 from uni_cockpit.logging_config import configure_logging
-from uni_cockpit.services.deadlines import deadline_views
+from uni_cockpit.models import FeedSource
+from uni_cockpit.services.deadlines import deadline_views, parse_event_id, set_deadline_done
 from uni_cockpit.services.fetcher import UrlCalendarFetcher
 from uni_cockpit.services.importer import (
     CalendarImportError,
@@ -21,8 +23,9 @@ from uni_cockpit.services.importer import (
     effective_hisinone_url,
     format_import_notice,
     format_timetable_notice,
-    import_from_configured_url,
     import_timetable_from_configured_url,
+    missing_hisinone_url_error,
+    missing_url_error,
     save_calendar_url,
     save_hisinone_url,
 )
@@ -32,6 +35,11 @@ from uni_cockpit.services.reminders import (
     build_reminder_scheduler,
     parse_reminder_offsets,
 )
+from uni_cockpit.services.sync import (
+    FeedRefresher,
+    parse_sync_interval_minutes,
+    run_serialized_import,
+)
 from uni_cockpit.services.timetable import (
     STALE_NOTICE,
     timetable_feed_is_stale,
@@ -39,7 +47,7 @@ from uni_cockpit.services.timetable import (
     week_page,
 )
 from uni_cockpit.services.urls import CalendarUrlError, mask_secret_url, validate_calendar_url
-from uni_cockpit.timeutil import SystemClock
+from uni_cockpit.timeutil import SystemClock, format_due_local
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 TEMPLATES = PACKAGE_DIR / "templates"
@@ -77,38 +85,62 @@ def create_app(
     async def lifespan(app: FastAPI):
         await app.state.reminders.start()
         try:
-            with Session(app.state.engine, expire_on_commit=False) as session:
-                if app.state.settings.relax_url:
-                    try:
-                        result = import_from_configured_url(
-                            session, app.state.settings, app.state.fetcher
-                        )
-                    except CalendarImportError as exc:
-                        app.state.import_error = str(exc)
-                    else:
+            imported = False
+            if app.state.settings.relax_url:
+                try:
+                    result = await run_serialized_import(app, reschedule_preserved=True)
+                except CalendarImportError as exc:
+                    app.state.import_error = str(exc)
+                else:
+                    if result is not None:
+                        imported = True
                         app.state.import_notice = format_import_notice(result)
-                _reschedule_reminders(app, session)
             if app.state.settings.hisinone_url:
-                error, notice = _import_timetable(app)
-                app.state.timetable_error = error
-                app.state.timetable_notice = notice
+                try:
+                    timetable_result = await run_serialized_import(
+                        app,
+                        import_timetable_blocking,
+                        reschedule_preserved=True,
+                    )
+                except CalendarImportError as exc:
+                    app.state.timetable_error = str(exc)
+                else:
+                    if timetable_result is not None:
+                        app.state.timetable_notice = format_timetable_notice(timetable_result)
+            if not imported:
+                with Session(app.state.engine, expire_on_commit=False) as session:
+                    _reschedule_reminders(app, session)
+            await app.state.feed_sync.start()
             yield
         finally:
-            await app.state.reminders.stop()
+            try:
+                await app.state.feed_sync.stop()
+            finally:
+                await app.state.reminders.stop()
 
     app = FastAPI(title="uni-cockpit", lifespan=lifespan)
     app.state.settings = settings
     app.state.engine = engine
-    app.state.fetcher = UrlCalendarFetcher(allow_local=settings.dev_allow_local_feeds)
+    app.state.fetcher = UrlCalendarFetcher(
+        allow_local=settings.dev_allow_local_feeds,
+        allowed_hosts=settings.feed_allowed_hosts,
+    )
     app.state.clock = clock
     if reminders is None:
         reminders = build_reminder_scheduler(settings, engine, _StateClock(app), offsets)
     app.state.reminders = reminders
     app.state.reminder_offsets = offsets
+    app.state.sync_interval_minutes = parse_sync_interval_minutes(settings.sync_interval_minutes)
+    app.state.feed_sync = FeedRefresher(
+        app,
+        interval=timedelta(minutes=app.state.sync_interval_minutes),
+    )
+    app.state.import_lock = asyncio.Lock()
     app.state.import_error = None
     app.state.import_notice = None
     app.state.timetable_error = None
     app.state.timetable_notice = None
+    app.state.undo_event_id = None
     app.state.templates = Jinja2Templates(directory=str(TEMPLATES))
     app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
 
@@ -117,23 +149,38 @@ def create_app(
         return _render_index(request)
 
     @app.post("/import")
-    def import_feed(request: Request):
-        error, notice = _import_now(request)
+    async def import_feed(request: Request):
+        error, notice = await _import_now(request)
         if request.headers.get("hx-request") == "true":
             return _render_partial(request, error=error, notice=notice)
         _store_flash(request, error, notice)
         return RedirectResponse("/", status_code=303)
+
+    @app.post("/deadlines/{event_id}/done")
+    def mark_done(request: Request, event_id: str):
+        parsed = parse_event_id(event_id)
+        if parsed is None:
+            return HTMLResponse("Diese Frist gibt es nicht.", status_code=404)
+        return _set_done(request, parsed, done=True)
+
+    @app.post("/deadlines/{event_id}/undo")
+    def undo_done(request: Request, event_id: str):
+        parsed = parse_event_id(event_id)
+        if parsed is None:
+            return HTMLResponse("Diese Frist gibt es nicht.", status_code=404)
+        return _set_done(request, parsed, done=False)
 
     @app.get("/settings", response_class=HTMLResponse)
     def settings_page(request: Request) -> HTMLResponse:
         return _render_settings(request)
 
     @app.post("/settings")
-    def save_settings(request: Request, calendar_url: str = Form("")):
+    async def save_settings(request: Request, calendar_url: str = Form("")):
         try:
             url = validate_calendar_url(
                 calendar_url,
                 allow_local=request.app.state.settings.dev_allow_local_feeds,
+                allowed_hosts=request.app.state.settings.feed_allowed_hosts,
             )
         except CalendarUrlError as exc:
             return _render_settings(request, error=str(exc), status_code=400)
@@ -147,7 +194,7 @@ def create_app(
                     "RELAX_ICAL_URL aus der Umgebung."
                 ),
             )
-        error, notice = _import_now(request)
+        error, notice = await _import_now(request)
         if error:
             return _render_index(request, error=error, notice=notice)
         _store_flash(request, None, notice)
@@ -158,17 +205,21 @@ def create_app(
         return _render_timetable(request, week=week)
 
     @app.post("/stundenplan/import")
-    def import_timetable(request: Request, week: str = Form("")):
-        error, notice = _import_timetable(request.app)
+    async def import_timetable(request: Request, week: str = Form("")):
+        error, notice = await _import_timetable(request.app)
         if error:
             return _render_timetable(request, error=error, notice=notice, week=week or None)
         _store_timetable_flash(request, None, notice)
         return RedirectResponse(_timetable_target(week), status_code=303)
 
     @app.post("/settings/timetable")
-    def save_timetable_settings(request: Request, hisinone_url: str = Form("")):
+    async def save_timetable_settings(request: Request, hisinone_url: str = Form("")):
         try:
-            url = _validated_calendar_url(hisinone_url, request.app.state.settings)
+            url = validate_calendar_url(
+                hisinone_url,
+                allow_local=request.app.state.settings.dev_allow_local_feeds,
+                allowed_hosts=request.app.state.settings.feed_allowed_hosts,
+            )
         except CalendarUrlError as exc:
             return _render_settings(request, error=str(exc), status_code=400)
         with Session(request.app.state.engine, expire_on_commit=False) as session:
@@ -181,7 +232,7 @@ def create_app(
                     "HISINONE_ICAL_URL aus der Umgebung."
                 ),
             )
-        error, notice = _import_timetable(request.app)
+        error, notice = await _import_timetable(request.app)
         if error:
             return _render_timetable(request, error=error, notice=notice)
         _store_timetable_flash(request, None, notice)
@@ -190,40 +241,57 @@ def create_app(
     return app
 
 
-def _import_now(request: Request) -> tuple[str | None, str | None]:
+async def _import_now(request: Request) -> tuple[str | None, str | None]:
+    try:
+        result = await run_serialized_import(request.app, reschedule_preserved=False)
+    except CalendarImportError as exc:
+        return str(exc), None
+    if result is None:
+        return str(missing_url_error()), None
+    return None, format_import_notice(result)
+
+
+def _set_done(request: Request, event_id: int, *, done: bool):
+    now = request.app.state.clock.now()
     with Session(request.app.state.engine, expire_on_commit=False) as session:
-        try:
-            result = import_from_configured_url(
-                session, request.app.state.settings, request.app.state.fetcher
-            )
-        except CalendarImportError as exc:
-            return str(exc), None
+        event = set_deadline_done(session, event_id, done=done, now=now)
+        if event is None:
+            return HTMLResponse("Diese Frist gibt es nicht.", status_code=404)
         _reschedule_reminders(request.app, session)
-        return None, format_import_notice(result)
+    if done:
+        notice = None
+        undo_id: int | None = event_id
+    else:
+        notice = "Wieder als offen markiert."
+        undo_id = None
+    if request.headers.get("hx-request") == "true":
+        return _render_partial(request, error=None, notice=notice, undo_id=undo_id)
+    _store_flash(request, None, notice, undo_id=undo_id)
+    return RedirectResponse("/", status_code=303)
 
 
-def _validated_calendar_url(url: str, settings: Settings) -> str:
-    """Validate like the RELAX form, including the host allowlist when Settings has one."""
-    kwargs: dict[str, object] = {"allow_local": settings.dev_allow_local_feeds}
-    hosts = getattr(settings, "feed_allowed_hosts", None)
-    if hosts is not None:
-        kwargs["allowed_hosts"] = hosts
-    return validate_calendar_url(url, **kwargs)
-
-
-def _import_timetable(app: FastAPI) -> tuple[str | None, str | None]:
-    """Import the HISinOne feed with `app.state.fetcher` (the shared calendar fetcher)."""
+def import_timetable_blocking(app: FastAPI, now: datetime):
+    """HISinOne import used by ``run_serialized_import``. Runs in a worker thread."""
     with Session(app.state.engine, expire_on_commit=False) as session:
-        try:
-            result = import_timetable_from_configured_url(
-                session,
-                app.state.settings,
-                app.state.fetcher,
-                now=app.state.clock.now(),
-            )
-        except CalendarImportError as exc:
-            return str(exc), None
-        return None, format_timetable_notice(result)
+        if effective_hisinone_url(session, app.state.settings) is None:
+            return None
+        return import_timetable_from_configured_url(
+            session,
+            app.state.settings,
+            app.state.fetcher,
+            now=now,
+        )
+
+
+async def _import_timetable(app: FastAPI) -> tuple[str | None, str | None]:
+    """Import the HISinOne feed with `app.state.fetcher` (the shared calendar fetcher)."""
+    try:
+        result = await run_serialized_import(app, import_timetable_blocking)
+    except CalendarImportError as exc:
+        return str(exc), None
+    if result is None:
+        return str(missing_hisinone_url_error()), None
+    return None, format_timetable_notice(result)
 
 
 def _timetable_target(week: str) -> str:
@@ -233,38 +301,60 @@ def _timetable_target(week: str) -> str:
 
 
 def _reschedule_reminders(app: FastAPI, session: Session) -> None:
-    """Hook for imports. Story 4 can call ``app.state.reminders.reschedule`` too."""
+    """Keep pending reminder jobs aligned with the database."""
     app.state.reminders.reschedule(session, now=app.state.clock.now())
 
 
-def _store_flash(request: Request, error: str | None, notice: str | None) -> None:
+def _store_flash(
+    request: Request,
+    error: str | None,
+    notice: str | None,
+    *,
+    undo_id: int | None = None,
+) -> None:
     request.app.state.import_error = error
     request.app.state.import_notice = notice
+    request.app.state.undo_event_id = undo_id
 
 
-def _consume_flash(request: Request) -> tuple[str | None, str | None]:
+def _consume_flash(request: Request) -> tuple[str | None, str | None, int | None]:
     error = request.app.state.import_error
     notice = request.app.state.import_notice
+    undo_id = request.app.state.undo_event_id
     request.app.state.import_error = None
     request.app.state.import_notice = None
-    return error, notice
+    request.app.state.undo_event_id = None
+    return error, notice, undo_id
 
 
-def _page_context(request: Request, error: str | None, notice: str | None) -> dict[str, object]:
+def _page_context(
+    request: Request,
+    error: str | None,
+    notice: str | None,
+    undo_id: int | None = None,
+) -> dict[str, object]:
     now = request.app.state.clock.now()
     with Session(request.app.state.engine, expire_on_commit=False) as session:
         deadlines = deadline_views(session, now)
         has_url = effective_calendar_url(session, request.app.state.settings) is not None
         today = today_lecture_views(session, now)
         stale = timetable_feed_is_stale(session)
+        source = session.exec(select(FeedSource).where(FeedSource.key == "relax")).first()
+    sync_at_label = None
+    if source is not None and source.last_sync_at is not None:
+        sync_at_label = format_due_local(source.last_sync_at)
     return {
         "deadlines": deadlines,
         "error": error,
         "notice": notice,
+        "undo_id": undo_id,
         "has_url": has_url,
         "today_lectures": today,
         "timetable_stale": stale,
         "timetable_stale_notice": STALE_NOTICE,
+        "sync_status": source.last_sync_status if source is not None else None,
+        "sync_message": source.last_sync_message if source is not None else None,
+        "sync_at_label": sync_at_label,
     }
 
 
@@ -275,9 +365,10 @@ def _render_index(
     notice: str | None = None,
     status_code: int = 200,
 ) -> HTMLResponse:
+    undo_id = None
     if error is None and notice is None:
-        error, notice = _consume_flash(request)
-    context = _page_context(request, error, notice)
+        error, notice, undo_id = _consume_flash(request)
+    context = _page_context(request, error, notice, undo_id)
     return request.app.state.templates.TemplateResponse(
         request,
         "index.html",
@@ -286,11 +377,17 @@ def _render_index(
     )
 
 
-def _render_partial(request: Request, *, error: str | None, notice: str | None) -> HTMLResponse:
+def _render_partial(
+    request: Request,
+    *,
+    error: str | None,
+    notice: str | None,
+    undo_id: int | None = None,
+) -> HTMLResponse:
     return request.app.state.templates.TemplateResponse(
         request,
         "partials/cockpit.html",
-        _page_context(request, error, notice),
+        _page_context(request, error, notice, undo_id),
     )
 
 

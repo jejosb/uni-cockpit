@@ -14,12 +14,20 @@ SECRET_HIS_TOKEN = "fixture-his-token-not-real"
 SECRET_HIS_URL = f"https://calendar.example.edu/hisinone/timetable.ics?token={SECRET_HIS_TOKEN}"
 
 
-def _app(tmp_path, url: str | None, *, allow_local: bool = True, relax_url: str | None = None):
+def _app(
+    tmp_path,
+    url: str | None,
+    *,
+    allow_local: bool = True,
+    relax_url: str | None = None,
+    allowed_hosts: str | None = None,
+):
     application = create_app(
         make_settings(
             tmp_path,
             relax_url,
             allow_local=allow_local,
+            allowed_hosts=allowed_hosts,
             hisinone_ical_url=url,
         )
     )
@@ -176,7 +184,7 @@ def test_failed_reload_keeps_lectures_and_hides_the_url(tmp_path, caplog):
 
 
 def test_settings_save_masks_the_hisinone_token(tmp_path, caplog):
-    application = _app(tmp_path, None, allow_local=True)
+    application = _app(tmp_path, None, allow_local=True, allowed_hosts="calendar.example.edu")
     application.state.fetcher = _StaticFetcher(read_fixture("hisinone_timetable.ics"))
     with TestClient(application) as client:
         with caplog.at_level(logging.DEBUG):

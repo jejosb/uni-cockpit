@@ -1,7 +1,7 @@
-import inspect
 import logging
 from datetime import UTC, date, datetime, timedelta
 
+import httpx
 import pytest
 from sqlmodel import select
 from telegram.ext import JobQueue
@@ -15,6 +15,7 @@ from uni_cockpit.models import CalendarEvent, FeedSource
 from uni_cockpit.services.deadlines import list_open_deadlines
 from uni_cockpit.services.fetcher import FeedFetchError, UrlCalendarFetcher
 from uni_cockpit.services.importer import (
+    EMPTY_FEED_MESSAGE,
     CalendarImportError,
     import_payload,
     import_timetable_from_configured_url,
@@ -22,7 +23,8 @@ from uni_cockpit.services.importer import (
     save_hisinone_url,
 )
 from uni_cockpit.services.reminders import reminder_is_current, reschedule_reminders
-from uni_cockpit.services.timetable import lectures_between, week_bounds
+from uni_cockpit.services.timetable import STALE_NOTICE, lectures_between, week_bounds
+from uni_cockpit.services.urls import HOST_NOT_ALLOWED_MESSAGE
 from uni_cockpit.timeutil import ensure_utc, format_clock_range, to_berlin
 
 SECRET_HIS_TOKEN = "fixture-his-token-not-real"
@@ -31,14 +33,10 @@ ROOT = FIXTURES.parents[1]
 
 
 def _fetcher(*, allow_local: bool) -> UrlCalendarFetcher:
-    """Build the shared fetcher. Passes `allowed_hosts` once that argument exists."""
-    kwargs: dict[str, object] = {"allow_local": allow_local}
-    parameters = inspect.signature(UrlCalendarFetcher.__init__).parameters
-    if "allowed_hosts" in parameters:
-        kwargs["allowed_hosts"] = frozenset(
-            {"calendar.example.edu", "relax.reutlingen-university.de"}
-        )
-    return UrlCalendarFetcher(**kwargs)
+    return UrlCalendarFetcher(
+        allow_local=allow_local,
+        allowed_hosts=frozenset({"calendar.example.edu", "relax.reutlingen-university.de"}),
+    )
 
 
 def test_parser_keeps_the_series_and_the_moved_occurrence_unexpanded():
@@ -195,93 +193,55 @@ def test_past_only_feed_keeps_lectures_and_marks_the_timetable_stale(session):
     assert source.timetable_stale is True
 
 
-def test_upcoming_feed_retires_lectures_only_and_relax_leaves_them(session):
-    import_payload(session, read_fixture("relax_deadlines.ics"))
+def test_upcoming_feed_retires_hisinone_rows_and_leaves_relax(session):
+    import_payload(session, read_fixture("relax_deadlines.ics"), now=FROZEN_NOW)
     import_timetable_payload(session, read_fixture("hisinone_timetable.ics"), now=FROZEN_NOW)
     deadlines_before = _fingerprint(
-        session.exec(select(CalendarEvent).where(CalendarEvent.kind == "deadline")).all()
+        list(session.exec(select(CalendarEvent).where(CalendarEvent.source == "relax")))
     )
-    hisinone = session.exec(select(FeedSource).where(FeedSource.key == "hisinone")).one()
-    open_uid = "his-open@calendar.example.edu#20261006T081500Z"
-    session.add(
-        CalendarEvent(
-            source_id=hisinone.id,
-            uid=open_uid,
-            kind="deadline",
-            title="Deadline sharing a lecture uid",
-            course="KEEP",
-            description=None,
-            location="Room 9.99",
-            starts_at=FROZEN_NOW,
-            ends_at=None,
-            due_at=FROZEN_NOW,
-            all_day=False,
-            recurrence_rule=None,
-            exception_dates=None,
-            is_done=True,
-            done_at=FROZEN_NOW,
-            removed_at=None,
-            created_at=FROZEN_NOW,
-            updated_at=FROZEN_NOW,
-        )
-    )
-    session.commit()
 
     import_timetable_payload(session, read_fixture("hisinone_open.ics"), now=FROZEN_NOW)
 
-    shared = session.exec(select(CalendarEvent).where(CalendarEvent.uid == open_uid)).one()
     deadlines_after = _fingerprint(
-        session.exec(select(CalendarEvent).where(CalendarEvent.kind == "deadline")).all()
+        list(session.exec(select(CalendarEvent).where(CalendarEvent.source == "relax")))
     )
-    assert deadlines_after == sorted(deadlines_before + _fingerprint([shared]))
-    assert shared.kind == "deadline"
-    assert shared.title == "Deadline sharing a lecture uid"
-    assert shared.location == "Room 9.99"
-    assert shared.is_done is True
-    assert shared.removed_at is None
+    assert deadlines_after == deadlines_before
     previous = [
-        row for row in session.exec(select(CalendarEvent)).all() if row.uid.startswith("his-db@")
+        row
+        for row in session.exec(select(CalendarEvent).where(CalendarEvent.source == "hisinone"))
+        if row.uid.startswith("his-db@") or row.uid == "his-seminar@calendar.example.edu"
     ]
     assert previous
     assert all(row.removed_at is not None for row in previous)
-    seminar = session.exec(
-        select(CalendarEvent).where(CalendarEvent.uid == "his-seminar@calendar.example.edu")
-    ).one()
-    assert seminar.removed_at is not None
-
-    lecture_before = _fingerprint(
-        session.exec(select(CalendarEvent).where(CalendarEvent.kind == "lecture")).all()
-    )
-    lab = session.exec(
-        select(CalendarEvent).where(CalendarEvent.uid == "evt-lab@calendar.example.edu")
-    ).one()
-    lab.kind = "lecture"
-    lab.title = "Planted lecture"
-    lab.location = "Room 8.08"
-    session.add(lab)
-    session.commit()
+    open_rows = [
+        row
+        for row in session.exec(select(CalendarEvent).where(CalendarEvent.source == "hisinone"))
+        if row.removed_at is None
+    ]
+    assert open_rows
+    assert all(row.uid.startswith("his-open@") for row in open_rows)
 
     renamed = read_fixture("relax_deadlines.ics").replace(
         b"Lab report is due",
         b"Lab report renamed",
     )
-    import_payload(session, renamed)
+    import_payload(session, renamed, now=FROZEN_NOW)
 
-    planted = session.exec(
-        select(CalendarEvent).where(CalendarEvent.uid == "evt-lab@calendar.example.edu")
+    lab = session.exec(
+        select(CalendarEvent).where(
+            CalendarEvent.uid == "evt-lab@calendar.example.edu",
+            CalendarEvent.source == "relax",
+        )
     ).one()
-    assert planted.kind == "lecture"
-    assert planted.title == "Planted lecture"
-    assert planted.location == "Room 8.08"
-    assert planted.removed_at is None
-    lecture_after = _fingerprint(
-        [
-            row
-            for row in session.exec(select(CalendarEvent).where(CalendarEvent.kind == "lecture"))
-            if row.uid != "evt-lab@calendar.example.edu"
-        ]
-    )
-    assert lecture_after == lecture_before
+    assert lab.title == "Lab report renamed"
+    assert lab.kind == "deadline"
+    assert lab.removed_at is None
+    still_open = [
+        row
+        for row in session.exec(select(CalendarEvent).where(CalendarEvent.source == "hisinone"))
+        if row.removed_at is None
+    ]
+    assert sorted(row.uid for row in still_open) == sorted(row.uid for row in open_rows)
 
 
 def test_exdate_and_recurrence_id_apply_after_the_dst_change():
@@ -530,5 +490,174 @@ def test_docs_describe_the_timetable_without_adding_its_host():
     app_source = (ROOT / "src/uni_cockpit/app.py").read_text(encoding="utf-8")
     assert app_source.count("UrlCalendarFetcher(") == 1
     assert app_source.count("validate_calendar_url(") == 2
-    assert "_validated_calendar_url(" in app_source
+    assert "allowed_hosts=request.app.state.settings.feed_allowed_hosts" in app_source
+    assert "_validated_calendar_url(" not in app_source
+    assert 'getattr(settings, "feed_allowed_hosts"' not in app_source
     assert "httpx" not in (ROOT / "src/uni_cockpit/feeds/hisinone.py").read_text(encoding="utf-8")
+
+
+_SHARED_UID = "evt-lab@calendar.example.edu"
+_SHARED_LECTURE = f"""BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//uni-cockpit//anonymized hisinone fixture//EN
+BEGIN:VEVENT
+UID:{_SHARED_UID}
+SUMMARY:Databases lecture
+DTSTART:20261008T081500Z
+DTEND:20261008T094500Z
+END:VEVENT
+END:VCALENDAR
+""".encode()
+
+
+def _drop_uid(payload: bytes, uid: str) -> bytes:
+    blocks = payload.decode().split("BEGIN:VEVENT")
+    kept = [blocks[0]]
+    for block in blocks[1:]:
+        if f"UID:{uid}" not in block.split("END:VEVENT", maxsplit=1)[0]:
+            kept.append("BEGIN:VEVENT" + block)
+    return "".join(kept).encode()
+
+
+def test_same_uid_from_relax_and_hisinone_stores_two_rows(session):
+    import_payload(session, read_fixture("relax_deadlines.ics"), now=FROZEN_NOW)
+    import_timetable_payload(session, _SHARED_LECTURE, now=FROZEN_NOW)
+
+    rows = list(session.exec(select(CalendarEvent).where(CalendarEvent.uid == _SHARED_UID)))
+    by_source = {row.source: row for row in rows}
+    assert set(by_source) == {"relax", "hisinone"}
+    assert by_source["relax"].kind == "deadline"
+    assert by_source["relax"].title == "Lab report is due"
+    assert by_source["hisinone"].kind == "lecture"
+    assert by_source["hisinone"].title == "Databases lecture"
+    assert by_source["hisinone"].source_id != by_source["relax"].source_id
+
+
+def test_empty_hisinone_fetch_records_only_the_hisinone_status(session):
+    import_payload(session, read_fixture("relax_deadlines.ics"), now=FROZEN_NOW)
+    import_timetable_payload(session, read_fixture("hisinone_timetable.ics"), now=FROZEN_NOW)
+    relax_before = session.exec(select(FeedSource).where(FeedSource.key == "relax")).one()
+    assert relax_before.last_sync_status == "ok"
+    assert relax_before.last_sync_message is None
+
+    import_timetable_payload(session, read_fixture("hisinone_empty.ics"), now=FROZEN_NOW)
+
+    relax_after = session.exec(select(FeedSource).where(FeedSource.key == "relax")).one()
+    hisinone = session.exec(select(FeedSource).where(FeedSource.key == "hisinone")).one()
+    assert relax_after.last_sync_status == "ok"
+    assert relax_after.last_sync_message is None
+    assert relax_after.last_sync_at == relax_before.last_sync_at
+    assert hisinone.last_sync_status == "empty"
+    assert hisinone.last_sync_message == STALE_NOTICE
+    assert hisinone.timetable_stale is True
+    lectures = list(session.exec(select(CalendarEvent).where(CalendarEvent.source == "hisinone")))
+    assert len(lectures) == 5
+    assert all(row.removed_at is None for row in lectures)
+
+
+def test_empty_relax_fetch_leaves_the_hisinone_status_and_notice(session):
+    import_payload(session, read_fixture("relax_deadlines.ics"), now=FROZEN_NOW)
+    import_timetable_payload(session, read_fixture("hisinone_empty.ics"), now=FROZEN_NOW)
+    his_before = session.exec(select(FeedSource).where(FeedSource.key == "hisinone")).one()
+    assert his_before.last_sync_status == "empty"
+    assert his_before.last_sync_message == STALE_NOTICE
+    assert his_before.timetable_stale is True
+    synced_at = his_before.last_sync_at
+
+    import_payload(session, read_fixture("empty_calendar.ics"), now=FROZEN_NOW)
+
+    his_after = session.exec(select(FeedSource).where(FeedSource.key == "hisinone")).one()
+    relax = session.exec(select(FeedSource).where(FeedSource.key == "relax")).one()
+    assert his_after.last_sync_status == "empty"
+    assert his_after.last_sync_message == STALE_NOTICE
+    assert his_after.timetable_stale is True
+    assert his_after.last_sync_at == synced_at
+    assert relax.last_sync_status == "empty"
+    assert relax.last_sync_message == EMPTY_FEED_MESSAGE
+    assert session.exec(select(CalendarEvent).where(CalendarEvent.source == "hisinone")).all() == []
+    relax_rows = list(session.exec(select(CalendarEvent).where(CalendarEvent.source == "relax")))
+    assert relax_rows
+    assert all(row.removed_at is None for row in relax_rows)
+
+
+def test_each_import_removes_rows_only_inside_its_own_source(session):
+    import_payload(session, read_fixture("relax_deadlines.ics"), now=FROZEN_NOW)
+    import_timetable_payload(session, read_fixture("hisinone_timetable.ics"), now=FROZEN_NOW)
+
+    import_timetable_payload(session, read_fixture("hisinone_open.ics"), now=FROZEN_NOW)
+
+    relax_rows = list(session.exec(select(CalendarEvent).where(CalendarEvent.source == "relax")))
+    assert relax_rows
+    assert all(row.removed_at is None for row in relax_rows)
+    retired = [
+        row
+        for row in session.exec(select(CalendarEvent).where(CalendarEvent.source == "hisinone"))
+        if row.uid.startswith("his-db@")
+    ]
+    assert retired
+    assert all(row.removed_at is not None for row in retired)
+
+    trimmed = _drop_uid(read_fixture("relax_deadlines.ics"), "evt-essay@calendar.example.edu")
+    import_payload(session, trimmed, now=FROZEN_NOW)
+
+    essay = session.exec(
+        select(CalendarEvent).where(
+            CalendarEvent.uid == "evt-essay@calendar.example.edu",
+            CalendarEvent.source == "relax",
+        )
+    ).one()
+    assert essay.removed_at is not None
+    lab = session.exec(
+        select(CalendarEvent).where(
+            CalendarEvent.uid == _SHARED_UID,
+            CalendarEvent.source == "relax",
+        )
+    ).one()
+    assert lab.removed_at is None
+    his_open = [
+        row
+        for row in session.exec(select(CalendarEvent).where(CalendarEvent.source == "hisinone"))
+        if row.uid.startswith("his-open@")
+    ]
+    assert his_open
+    assert all(row.removed_at is None for row in his_open)
+    assert all(row.removed_at is not None for row in retired)
+
+
+def test_foreign_hisinone_host_is_rejected_without_a_request(session, caplog):
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        return httpx.Response(200, content=b"BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n")
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    settings = Settings(
+        hisinone_ical_url=SECRET_HIS_URL,
+        database_url="sqlite://",
+        dev_allow_local_feeds=False,
+        _env_file=None,
+    )
+    fetcher = UrlCalendarFetcher(
+        client=client,
+        allow_local=settings.dev_allow_local_feeds,
+        allowed_hosts=settings.feed_allowed_hosts,
+    )
+    with caplog.at_level(logging.DEBUG), pytest.raises(CalendarImportError) as caught:
+        import_timetable_from_configured_url(session, settings, fetcher, now=FROZEN_NOW)
+    client.close()
+
+    assert seen == []
+    assert caught.value.code == "host"
+    assert str(caught.value) == HOST_NOT_ALLOWED_MESSAGE
+    assert SECRET_HIS_TOKEN not in str(caught.value)
+    assert SECRET_HIS_URL not in str(caught.value)
+    assert "calendar.example.edu" not in str(caught.value)
+    assert SECRET_HIS_TOKEN not in caplog.text
+    assert SECRET_HIS_URL not in caplog.text
+    assert "calendar.example.edu" not in caplog.text
+    source = session.exec(select(FeedSource).where(FeedSource.key == "hisinone")).one()
+    assert source.last_sync_status == "error"
+    assert source.last_sync_message == HOST_NOT_ALLOWED_MESSAGE
+    relax = session.exec(select(FeedSource).where(FeedSource.key == "relax")).first()
+    assert relax is None
