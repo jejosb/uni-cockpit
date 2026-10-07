@@ -105,6 +105,26 @@ button, .text-link {
 
 button:hover, .text-link:hover { background: var(--green-deep); }
 
+button.button-quiet {
+  background: transparent;
+  color: var(--green);
+  border: 1px solid var(--green);
+  padding: 0.35rem 0.8rem;
+}
+
+button.button-quiet:hover { background: var(--notice-bg); color: var(--green-deep); }
+
+.done-form { margin: 0.7rem 0 0; }
+
+.undo-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+}
+
+.undo-row form { margin: 0; }
+
 .banner {
   margin: 0 0 1rem;
   padding: 0.8rem 1rem;
@@ -202,4 +222,6 @@ input[type="url"] {
   nav { margin-top: 0.8rem; }
   h1 { font-size: 2rem; }
   .page-head button { margin-top: 0.8rem; }
+  .undo-row { display: block; }
+  .undo-row form { margin-top: 0.6rem; }
 }

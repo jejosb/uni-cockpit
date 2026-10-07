@@ -19,7 +19,7 @@ from tests.conftest import (
 )
 from uni_cockpit.app import create_app
 from uni_cockpit.config import Settings
-from uni_cockpit.models import CalendarEvent
+from uni_cockpit.models import CalendarEvent, FeedSource
 from uni_cockpit.services.fetcher import FeedFetchError, UrlCalendarFetcher
 from uni_cockpit.services.importer import save_calendar_url, stored_relax_url
 from uni_cockpit.services.urls import HOST_NOT_ALLOWED_MESSAGE
@@ -412,6 +412,10 @@ def test_import_rejects_a_previously_stored_foreign_host(tmp_path, caplog):
     assert seen == []
     assert before == after
     assert len(before) == 7
+    with Session(application.state.engine, expire_on_commit=False) as session:
+        source = session.exec(select(FeedSource).where(FeedSource.key == "relax")).one()
+        assert source.last_sync_status == "error"
+        assert source.last_sync_message == HOST_NOT_ALLOWED_MESSAGE
     assert HOST_NOT_ALLOWED_MESSAGE in response.text
     assert "Lab report is due" in response.text
     assert foreign not in response.text

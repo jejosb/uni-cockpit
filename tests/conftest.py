@@ -83,6 +83,7 @@ def make_settings(
     reminder_offsets_hours: str = "72,24",
     telegram_bot_token: str | None = None,
     telegram_chat_id: str | None = None,
+    sync_interval_minutes: str = "60",
 ) -> Settings:
     """Test apps load fixtures via file://, so the dev flag defaults to on.
 
@@ -101,5 +102,6 @@ def make_settings(
         reminder_offsets_hours=reminder_offsets_hours,
         telegram_bot_token=telegram_bot_token,
         telegram_chat_id=telegram_chat_id,
+        sync_interval_minutes=sync_interval_minutes,
         _env_file=None,
     )
