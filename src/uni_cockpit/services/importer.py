@@ -19,13 +19,16 @@ from datetime import UTC, datetime
 from sqlmodel import Session, col, select
 
 from uni_cockpit.config import Settings
+from uni_cockpit.feeds.hisinone import HisinoneTimetableAdapter
 from uni_cockpit.feeds.ical import CalendarParseError, parse_icalendar
 from uni_cockpit.feeds.parsed import EventDraft, FeedAdapter
 from uni_cockpit.feeds.relax import RelaxDeadlineAdapter
+from uni_cockpit.feeds.timetable_time import attach_feed_clocks
 from uni_cockpit.models import CalendarEvent, FeedSource
 from uni_cockpit.services.fetcher import FeedFetchError, HostNotAllowedError, LocalFeedDisabledError
+from uni_cockpit.services.timetable import STALE_NOTICE
 from uni_cockpit.services.urls import HOST_NOT_ALLOWED_MESSAGE
-from uni_cockpit.timeutil import ensure_utc
+from uni_cockpit.timeutil import ensure_utc, to_berlin
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +67,31 @@ def parse_failed_error() -> CalendarImportError:
     return CalendarImportError("parse", PARSE_FAILED_MESSAGE)
 
 
+def missing_hisinone_url_error() -> CalendarImportError:
+    return CalendarImportError(
+        "missing",
+        "Es ist keine HISinOne-Stundenplan-URL hinterlegt. "
+        "Trag sie in den Einstellungen ein oder setze HISINONE_ICAL_URL.",
+    )
+
+
+TIMETABLE_LOAD_FAILED_MESSAGE = (
+    "Der Stundenplan konnte nicht geladen werden. "
+    "Prüfe die URL und die Verbindung. Bereits importierte Termine bleiben erhalten."
+)
+TIMETABLE_PARSE_FAILED_MESSAGE = (
+    "Die Antwort ist kein gültiger iCalendar-Feed. Bereits importierte Termine bleiben erhalten."
+)
+
+
+def timetable_load_failed_error() -> CalendarImportError:
+    return CalendarImportError("load", TIMETABLE_LOAD_FAILED_MESSAGE)
+
+
+def timetable_parse_failed_error() -> CalendarImportError:
+    return CalendarImportError("parse", TIMETABLE_PARSE_FAILED_MESSAGE)
+
+
 @dataclass(frozen=True)
 class ImportResult:
     created: int
@@ -78,6 +106,13 @@ def format_import_notice(result: ImportResult) -> str:
         f"Kalender importiert: {result.created} neu, "
         f"{result.updated} aktualisiert, {result.removed} entfernt, "
         f"{result.skipped} übersprungen."
+    )
+
+
+def format_timetable_notice(result: ImportResult) -> str:
+    return (
+        f"Stundenplan importiert: {result.created} neu, "
+        f"{result.updated} aktualisiert, {result.skipped} übersprungen."
     )
 
 
@@ -119,6 +154,63 @@ def import_from_configured_url(
     return import_payload(session, payload, now=now)
 
 
+def import_timetable_from_configured_url(
+    session: Session,
+    settings: Settings,
+    fetcher,
+    *,
+    now: datetime,
+) -> ImportResult:
+    """Load `HISINONE_ICAL_URL` with the same fetcher the RELAX import uses.
+
+    `fetcher` is the app's `UrlCalendarFetcher`. This function does not open
+    its own HTTP client. A failed download leaves existing lecture rows unchanged.
+    """
+    url = effective_hisinone_url(session, settings)
+    if not url:
+        raise missing_hisinone_url_error()
+    try:
+        payload = fetcher.fetch(url)
+    except HostNotAllowedError:
+        logger.warning("timetable import rejected a host outside the allowlist")
+        record_sync_status(
+            session,
+            source="hisinone",
+            status="error",
+            message=HOST_NOT_ALLOWED_MESSAGE,
+            now=_moment(now),
+        )
+        raise CalendarImportError("host", HOST_NOT_ALLOWED_MESSAGE) from None
+    except LocalFeedDisabledError as exc:
+        logger.warning("timetable import rejected a local feed")
+        error = CalendarImportError("local", str(exc))
+        record_sync_status(
+            session, source="hisinone", status="error", message=str(error), now=_moment(now)
+        )
+        raise error from None
+    except FeedFetchError:
+        logger.warning("timetable import failed because the feed could not be loaded")
+        record_sync_status(
+            session,
+            source="hisinone",
+            status="error",
+            message=TIMETABLE_LOAD_FAILED_MESSAGE,
+            now=_moment(now),
+        )
+        raise timetable_load_failed_error() from None
+    return import_timetable_payload(session, payload, now=now)
+
+
+def import_timetable_payload(
+    session: Session,
+    payload: bytes | str,
+    *,
+    now: datetime,
+) -> ImportResult:
+    get_or_create_source(session, key="hisinone", title="HISinOne")
+    return import_payload(session, payload, adapter=HisinoneTimetableAdapter(), now=now)
+
+
 def import_payload(
     session: Session,
     payload: bytes | str,
@@ -132,14 +224,22 @@ def import_payload(
         parsed = parse_icalendar(payload)
     except CalendarParseError:
         logger.warning("calendar import failed because the feed was not valid iCalendar")
+        if isinstance(adapter, HisinoneTimetableAdapter):
+            message = TIMETABLE_PARSE_FAILED_MESSAGE
+            error = timetable_parse_failed_error()
+        else:
+            message = PARSE_FAILED_MESSAGE
+            error = parse_failed_error()
         record_sync_status(
             session,
             source=adapter.source_key,
             status="error",
-            message=PARSE_FAILED_MESSAGE,
+            message=message,
             now=moment,
         )
-        raise parse_failed_error() from None
+        raise error from None
+    if isinstance(adapter, HisinoneTimetableAdapter):
+        return _import_timetable_events(session, payload, parsed, adapter, moment)
     drafts = [adapter.adapt(event) for event in parsed.events]
     if not any(draft.kind == "deadline" for draft in drafts) and _has_open_future_deadlines(
         session, adapter.source_key, moment
@@ -188,6 +288,27 @@ def effective_calendar_url(session: Session, settings: Settings) -> str | None:
 
 def save_calendar_url(session: Session, url: str) -> FeedSource:
     source = get_or_create_source(session, key="relax", title="RELAX")
+    source.url = url
+    source.updated_at = _now()
+    session.add(source)
+    session.commit()
+    return source
+
+
+def stored_hisinone_url(session: Session) -> str | None:
+    source = session.exec(select(FeedSource).where(FeedSource.key == "hisinone")).first()
+    if source is None or not source.url:
+        return None
+    return source.url
+
+
+def effective_hisinone_url(session: Session, settings: Settings) -> str | None:
+    """`HISINONE_ICAL_URL` wins. The settings page is the fallback when it is empty."""
+    return settings.hisinone_url or stored_hisinone_url(session)
+
+
+def save_hisinone_url(session: Session, url: str) -> FeedSource:
+    source = get_or_create_source(session, key="hisinone", title="HISinOne")
     source.url = url
     source.updated_at = _now()
     session.add(source)
@@ -246,6 +367,14 @@ def upsert_events(
     )
 
 
+def _feed_title(source_key: str) -> str:
+    if source_key == "relax":
+        return "RELAX"
+    if source_key == "hisinone":
+        return "HISinOne"
+    return source_key
+
+
 def _upsert(
     session: Session,
     source_key: str,
@@ -253,12 +382,9 @@ def _upsert(
     *,
     skipped_uids: set[str],
     now: datetime,
+    retire_missing: bool = True,
 ) -> tuple[int, int, int]:
-    source = get_or_create_source(
-        session,
-        key=source_key,
-        title="RELAX" if source_key == "relax" else source_key,
-    )
+    source = get_or_create_source(session, key=source_key, title=_feed_title(source_key))
     created = 0
     updated = 0
     removed = 0
@@ -285,28 +411,30 @@ def _upsert(
             removed += 1
         session.add(existing)
         updated += 1
-    stored = session.exec(select(CalendarEvent).where(CalendarEvent.source == source_key)).all()
-    kept_skipped = 0
-    for row in stored:
-        if row.uid in skipped_uids and row.removed_at is None and row.kind == "deadline":
-            kept_skipped += 1
-        if row.uid in seen or row.removed_at is not None:
-            continue
-        row.removed_at = now
-        row.updated_at = now
-        session.add(row)
-        removed += 1
-    if kept_skipped:
-        logger.warning(
-            "kept %s known deadline(s) because their calendar event was skipped; "
-            "they were not marked removed",
-            kept_skipped,
-        )
+    if retire_missing:
+        stored = session.exec(select(CalendarEvent).where(CalendarEvent.source == source_key)).all()
+        kept_skipped = 0
+        for row in stored:
+            if row.uid in skipped_uids and row.removed_at is None and row.kind == "deadline":
+                kept_skipped += 1
+            if row.uid in seen or row.removed_at is not None:
+                continue
+            row.removed_at = now
+            row.updated_at = now
+            session.add(row)
+            removed += 1
+        if kept_skipped:
+            logger.warning(
+                "kept %s known deadline(s) because their calendar event was skipped; "
+                "they were not marked removed",
+                kept_skipped,
+            )
     source.last_imported_at = now
-    source.last_sync_at = now
-    source.last_sync_status = "ok"
-    source.last_sync_message = None
     source.updated_at = now
+    if retire_missing:
+        source.last_sync_at = now
+        source.last_sync_status = "ok"
+        source.last_sync_message = None
     session.add(source)
     session.commit()
     return created, updated, removed
@@ -376,6 +504,77 @@ def _has_open_future_deadlines(session: Session, source_key: str, now: datetime)
     return any(ensure_utc(row.due_at) >= moment for row in rows)
 
 
+def _import_timetable_events(session, payload, parsed, adapter: HisinoneTimetableAdapter, moment):
+    """Expand one HISinOne feed and store it on ``source='hisinone'`` only.
+
+    A feed with no upcoming lecture, empty or only in the past, keeps every
+    stored row. A feed that still has an upcoming lecture retires missing rows
+    of this source and no other.
+    """
+    get_or_create_source(session, key="hisinone", title="HISinOne")
+    events = attach_feed_clocks(payload, parsed.events)
+    drafts = adapter.adapt_all(events)
+    skipped = len(parsed.skipped) + int(adapter.skipped or 0)
+    if not _has_upcoming_lecture(drafts, moment):
+        created, updated, _removed = _upsert(
+            session,
+            "hisinone",
+            drafts,
+            skipped_uids=set(),
+            now=moment,
+            retire_missing=False,
+        )
+        _set_timetable_stale(session, True, moment)
+        record_sync_status(
+            session,
+            source="hisinone",
+            status="empty",
+            message=STALE_NOTICE,
+            now=moment,
+        )
+        return ImportResult(
+            created=created,
+            updated=updated,
+            removed=0,
+            skipped=skipped,
+            preserved=True,
+        )
+    result = upsert_events(
+        session,
+        drafts,
+        source="hisinone",
+        skipped_uids=parsed.skipped_uids,
+        now=moment,
+    )
+    _set_timetable_stale(session, False, moment)
+    return ImportResult(
+        created=result.created,
+        updated=result.updated,
+        removed=result.removed,
+        skipped=skipped,
+    )
+
+
+def _set_timetable_stale(session: Session, stale: bool, now: datetime) -> None:
+    source = get_or_create_source(session, key="hisinone", title="HISinOne")
+    source.timetable_stale = stale
+    source.updated_at = now
+    session.add(source)
+    session.commit()
+
+
+def _has_upcoming_lecture(drafts: list[EventDraft], now: datetime) -> bool:
+    """True when any lecture is still today or later in Europe/Berlin, or still running."""
+    today = to_berlin(now).date()
+    now_utc = ensure_utc(now)
+    for draft in drafts:
+        if draft.ends_at is not None and ensure_utc(draft.ends_at) >= now_utc:
+            return True
+        if to_berlin(draft.starts_at).date() >= today:
+            return True
+    return False
+
+
 def record_sync_status(
     session: Session,
     *,
@@ -389,11 +588,7 @@ def record_sync_status(
     ``status`` is ``ok``, ``empty``, or ``error``. A second feed uses its own
     key, for example ``source="hisinone"``, and does not overwrite ``relax``.
     """
-    source_row = get_or_create_source(
-        session,
-        key=source,
-        title="RELAX" if source == "relax" else source,
-    )
+    source_row = get_or_create_source(session, key=source, title=_feed_title(source))
     moment = _moment(now)
     source_row.last_sync_at = moment
     source_row.last_sync_status = status

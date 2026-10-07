@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 _SECRET_KEYS = {"authtoken", "access_token", "token"}
 _LOCAL_HTTP_HOSTS = {"localhost", "127.0.0.1"}
 
-# The HISinOne host will be added with issue #5.
+# The timetable host is not in this default. Add it through FEED_ALLOWED_HOSTS.
 DEFAULT_FEED_HOST = "relax.reutlingen-university.de"
 
 LOCAL_FEEDS_DISABLED_MESSAGE = (

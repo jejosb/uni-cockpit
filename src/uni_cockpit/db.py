@@ -74,6 +74,10 @@ def _migrate_sqlite(engine: Engine) -> None:
             )
         if "last_sync_message" not in source_columns:
             connection.exec_driver_sql("ALTER TABLE feed_sources ADD COLUMN last_sync_message TEXT")
+        if "timetable_stale" not in source_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE feed_sources ADD COLUMN timetable_stale BOOLEAN NOT NULL DEFAULT 0"
+            )
 
     with engine.connect() as connection:
         if not _events_unique_on_source_and_uid(connection):

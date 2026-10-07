@@ -84,6 +84,7 @@ def make_settings(
     telegram_bot_token: str | None = None,
     telegram_chat_id: str | None = None,
     sync_interval_minutes: str = "60",
+    hisinone_ical_url: str | None = None,
 ) -> Settings:
     """Test apps load fixtures via file://, so the dev flag defaults to on.
 
@@ -103,5 +104,6 @@ def make_settings(
         telegram_bot_token=telegram_bot_token,
         telegram_chat_id=telegram_chat_id,
         sync_interval_minutes=sync_interval_minutes,
+        hisinone_ical_url=hisinone_ical_url,
         _env_file=None,
     )

@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}Stundenplan · uni-cockpit{% endblock %}
+{% block content %}
+  <section class="page-head">
+    <div>
+      <h1>Stundenplan</h1>
+      <p class="lede">{{ page.title }} · Uhrzeiten in Europe/Berlin. Fristen stehen getrennt unter „Fristen“.</p>
+    </div>
+    {% if page.has_url %}
+      <form method="post" action="/stundenplan/import">
+        <input type="hidden" name="week" value="{{ page.monday }}">
+        <button type="submit">Stundenplan aktualisieren</button>
+      </form>
+    {% endif %}
+  </section>
+  <nav class="week-nav" aria-label="Woche">
+    <a href="/stundenplan?week={{ page.previous_week }}">Vorherige Woche</a>
+    <a href="/stundenplan?week={{ page.next_week }}">Nächste Woche</a>
+    {% if not page.is_current %}
+      <a href="/stundenplan">Aktuelle Woche</a>
+    {% endif %}
+  </nav>
+  {% if error %}
+    <p class="banner banner-error" role="alert">{{ error }}</p>
+  {% endif %}
+  {% if notice %}
+    <p class="banner banner-notice" role="status">{{ notice }}</p>
+  {% endif %}
+  {% if page.stale %}
+    <p class="banner banner-notice" role="status">{{ timetable_stale_notice }}</p>
+  {% endif %}
+  {% if page.days %}
+    {% for day in page.days %}
+      <section class="day-group">
+        <h2>
+          {{ day.label }}
+          {% if day.is_today %}<span class="badge badge-today">Heute</span>{% endif %}
+        </h2>
+        {% with lectures=day.lectures %}
+          {% include "partials/lectures.html" %}
+        {% endwith %}
+      </section>
+    {% endfor %}
+  {% else %}
+    <div class="empty-state">
+      <h2>Keine Veranstaltungen</h2>
+      {% if page.has_url %}
+        <p>In dieser Woche sind keine Veranstaltungen eingetragen.</p>
+      {% else %}
+        <p>Hinterlege einmal die HISinOne-Stundenplan-URL. Danach erscheint hier die aktuelle Woche mit Uhrzeit und Raum.</p>
+        <p><a class="text-link" href="/settings#timetable">Stundenplan-URL eintragen</a></p>
+      {% endif %}
+    </div>
+  {% endif %}
+{% endblock %}

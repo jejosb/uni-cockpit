@@ -34,6 +34,8 @@ class FeedSource(SQLModel, table=True):
     # ok, empty, or error. The cockpit reads this after a reload.
     last_sync_status: str | None = None
     last_sync_message: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
+    # Set when the last successful HISinOne import had no upcoming lectures.
+    timetable_stale: bool = Field(default=False)
 
 
 class CalendarEvent(SQLModel, table=True):

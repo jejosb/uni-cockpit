@@ -17,7 +17,13 @@ class ParsedEvent:
     all_day: bool
     recurrence_rule: str | None
     exception_dates: tuple[datetime, ...]
+    recurrence_id: datetime | None = None
+    start_zone: str = "Europe/Berlin"
     status: str | None = None
+    # Filled only by the timetable loader. The RELAX parser leaves these empty.
+    feed_tzid: str | None = None
+    feed_wall: datetime | None = None
+    feed_tzid_unknown: bool = False
 
 
 @dataclass(frozen=True)

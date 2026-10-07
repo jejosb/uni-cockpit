@@ -14,6 +14,8 @@ def test_parser_reads_uid_summary_and_utc_start():
     assert lab.categories == ("DBSYS",)
     assert lab.starts_at == datetime(2026, 10, 8, 16, 0, tzinfo=UTC)
     assert lab.recurrence_rule is None
+    assert lab.recurrence_id is None
+    assert lab.start_zone == "UTC"
 
 
 def test_incomplete_events_are_reported():
@@ -34,6 +36,8 @@ def test_recurring_event_is_not_expanded():
     assert event.location == "Room 4.12"
     assert event.exception_dates == (datetime(2026, 10, 13, 8, 15, tzinfo=UTC),)
     assert event.starts_at == datetime(2026, 10, 6, 8, 15, tzinfo=UTC)
+    assert event.recurrence_id is None
+    assert event.start_zone == "Europe/Berlin"
 
     draft = RelaxDeadlineAdapter().adapt(event)
     assert draft.recurrence_rule == event.recurrence_rule

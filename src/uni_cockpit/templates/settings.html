@@ -33,4 +33,20 @@
       <button type="submit">Speichern und importieren</button>
     </form>
   </section>
+  <section class="panel" id="timetable">
+    <h2>HISinOne-Stundenplan</h2>
+    <p>Die Adresse kann einen persönlichen Token enthalten. Sie bleibt in der lokalen Datenbank oder in <code>HISINONE_ICAL_URL</code> und wird nicht ins Log geschrieben.</p>
+    <p>Der Host muss in <code>FEED_ALLOWED_HOSTS</code> stehen. Der HISinOne-Host ist dort nicht voreingestellt.</p>
+    {% if hisinone_env_configured %}
+      <p class="hint">Für den Import gilt die Umgebungsvariable <code>HISINONE_ICAL_URL</code>. Eine hier gespeicherte URL ist nur der Ersatz, wenn die Variable leer ist.</p>
+    {% endif %}
+    {% if masked_hisinone_url %}
+      <p class="stored">Aktiv: <code>{{ masked_hisinone_url }}</code></p>
+    {% endif %}
+    <form method="post" action="/settings/timetable">
+      <label for="hisinone_url">Stundenplan-URL</label>
+      <input id="hisinone_url" name="hisinone_url" type="url" autocomplete="off" spellcheck="false" placeholder="https://example.edu/hisinone/timetable.ics?token=…">
+      <button type="submit">Stundenplan speichern</button>
+    </form>
+  </section>
 {% endblock %}

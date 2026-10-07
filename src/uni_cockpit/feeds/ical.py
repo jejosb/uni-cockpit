@@ -99,6 +99,8 @@ def _parse_event(component, index: int) -> ParsedEvent | str:
         all_day=all_day,
         recurrence_rule=_recurrence_rule(component),
         exception_dates=_exception_instants(component),
+        recurrence_id=_optional_instant(component, "recurrence-id"),
+        start_zone=_zone_name(start_raw),
         status=_text(component, "status"),
     )
 
@@ -121,6 +123,19 @@ def _optional_instant(component, name: str) -> datetime | None:
         return None
     instant, _all_day = _normalize_instant(raw)
     return instant
+
+
+def _zone_name(value: datetime | date) -> str:
+    """IANA name of a feed instant, before it is stored as UTC.
+
+    Zulu values keep ``UTC``. Naive values and bare dates are read as
+    Europe/Berlin, matching `_normalize_instant`.
+    """
+    if isinstance(value, datetime) and value.tzinfo is not None:
+        key = getattr(value.tzinfo, "key", None)
+        if isinstance(key, str) and key:
+            return key
+    return "Europe/Berlin"
 
 
 def _normalize_instant(value: datetime | date) -> tuple[datetime, bool]:
