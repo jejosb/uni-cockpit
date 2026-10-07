@@ -26,7 +26,10 @@ def test_import_from_relax_ical_url_stores_title_course_utc_due_and_uid(session,
     result = import_from_configured_url(
         session,
         settings,
-        UrlCalendarFetcher(allow_local=settings.dev_allow_local_feeds),
+        UrlCalendarFetcher(
+            allow_local=settings.dev_allow_local_feeds,
+            allowed_hosts=settings.feed_allowed_hosts,
+        ),
     )
 
     assert result.created == 7
@@ -138,4 +141,5 @@ def test_fixtures_and_example_env_keep_secrets_out_of_band():
     assert "RELAX_ICAL_URL=" in example
     assert "REMINDER_OFFSETS_HOURS=72,24" in example
     assert "YOUR_TOKEN" in example
+    assert "FEED_ALLOWED_HOSTS=relax.reutlingen-university.de" in example
     assert SECRET_TOKEN not in example

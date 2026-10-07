@@ -85,7 +85,10 @@ def create_app(
     app = FastAPI(title="uni-cockpit", lifespan=lifespan)
     app.state.settings = settings
     app.state.engine = engine
-    app.state.fetcher = UrlCalendarFetcher(allow_local=settings.dev_allow_local_feeds)
+    app.state.fetcher = UrlCalendarFetcher(
+        allow_local=settings.dev_allow_local_feeds,
+        allowed_hosts=settings.feed_allowed_hosts,
+    )
     app.state.clock = clock
     if reminders is None:
         reminders = build_reminder_scheduler(settings, engine, _StateClock(app), offsets)
@@ -118,6 +121,7 @@ def create_app(
             url = validate_calendar_url(
                 calendar_url,
                 allow_local=request.app.state.settings.dev_allow_local_feeds,
+                allowed_hosts=request.app.state.settings.feed_allowed_hosts,
             )
         except CalendarUrlError as exc:
             return _render_settings(request, error=str(exc), status_code=400)
