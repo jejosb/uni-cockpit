@@ -28,10 +28,10 @@ from tests.conftest import (
 from tests.test_reminders import _FakeApplication
 from uni_cockpit.app import create_app
 from uni_cockpit.feeds.ical import parse_icalendar
-from uni_cockpit.models import CalendarEvent
+from uni_cockpit.models import CalendarEvent, FeedSource
 from uni_cockpit.services.deadlines import list_open_deadlines, set_deadline_done
 from uni_cockpit.services.fetcher import FeedFetchError, UrlCalendarFetcher
-from uni_cockpit.services.importer import ImportResult, import_payload
+from uni_cockpit.services.importer import ImportResult, import_payload, save_calendar_url
 from uni_cockpit.services.reminders import (
     TelegramReminderScheduler,
     compute_reminder_times,
@@ -42,6 +42,7 @@ from uni_cockpit.services.sync import (
     parse_sync_interval_minutes,
     run_serialized_import,
 )
+from uni_cockpit.services.urls import HOST_NOT_ALLOWED_MESSAGE
 from uni_cockpit.timeutil import ensure_utc
 
 _EVENT = re.compile(r"BEGIN:VEVENT.*?END:VEVENT\n", re.S)
@@ -648,6 +649,52 @@ def test_periodic_empty_feed_keeps_deadlines_and_shows_the_notice(tmp_path, capl
         cleared = client.get("/")
         assert "leeren Kalender" not in cleared.text
         assert "Lab report is due" in cleared.text
+
+
+@pytest.mark.parametrize("stored_in", ["relax_ical_url", "database"])
+def test_periodic_refresh_rejects_a_foreign_host_without_http(
+    tmp_path, caplog, monkeypatch, stored_in
+):
+    fixture = FIXTURES.joinpath("relax_deadlines.ics").resolve().as_uri()
+    application = _app(tmp_path, fixture, allow_local=True)
+    reminders = _QueueReminders()
+    application.state.reminders = reminders
+    assert application.state.fetcher.allowed_hosts == application.state.settings.feed_allowed_hosts
+    http_calls = {"n": 0}
+
+    def forbid_http(self, url: str) -> bytes:
+        http_calls["n"] += 1
+        raise AssertionError(url)
+
+    with TestClient(application) as client:
+        before = _snapshot(application, reminders.queue)
+        assert before[0]
+        monkeypatch.setattr(UrlCalendarFetcher, "_read_http", forbid_http)
+        if stored_in == "relax_ical_url":
+            application.state.settings.relax_ical_url = SECRET_URL
+        else:
+            application.state.settings.relax_ical_url = None
+            with Session(application.state.engine, expire_on_commit=False) as session:
+                save_calendar_url(session, SECRET_URL)
+        caplog.clear()
+        with caplog.at_level(logging.DEBUG):
+            assert client.portal.call(application.state.feed_sync.refresh_once) is False
+        assert http_calls["n"] == 0
+        assert _snapshot(application, reminders.queue) == before
+        page = client.get("/")
+        assert HOST_NOT_ALLOWED_MESSAGE in page.text
+        assert "Lab report is due" in page.text
+        assert SECRET_URL not in page.text
+        assert SECRET_TOKEN not in page.text
+        assert "calendar.example.edu" not in page.text
+        assert SECRET_URL not in caplog.text
+        assert SECRET_TOKEN not in caplog.text
+        assert "calendar.example.edu" not in caplog.text
+        assert "authtoken" not in caplog.text.lower()
+        with Session(application.state.engine, expire_on_commit=False) as session:
+            source = session.exec(select(FeedSource).where(FeedSource.key == "relax")).one()
+            assert source.last_sync_status == "error"
+            assert source.last_sync_message == HOST_NOT_ALLOWED_MESSAGE
 
 
 def test_periodic_invalid_feed_keeps_rows_jobs_and_shows_a_generic_error(tmp_path, caplog):
