@@ -36,6 +36,32 @@ def test_weekly_series_keeps_berlin_wall_time_across_the_spring_change(caplog):
 
 @pytest.mark.parametrize(
     "fixture_name",
+    ["hisinone_spring_gap_weekly.ics", "hisinone_spring_gap_weekly_floating.ics"],
+)
+def test_weekly_expansion_hits_the_spring_gap_once(fixture_name, caplog):
+    with caplog.at_level(logging.WARNING):
+        drafts = lecture_drafts(read_fixture(fixture_name))
+
+    assert len(drafts) == 3
+    by_day = {to_berlin(draft.starts_at).date(): draft for draft in drafts}
+    assert len(by_day) == 3
+    march_21 = by_day[datetime(2027, 3, 21, tzinfo=UTC).date()]
+    march_28 = by_day[datetime(2027, 3, 28, tzinfo=UTC).date()]
+    april_4 = by_day[datetime(2027, 4, 4, tzinfo=UTC).date()]
+    assert march_21.starts_at == datetime(2027, 3, 21, 1, 30, tzinfo=UTC)
+    assert format_due_local(march_21.starts_at) == "So, 21.03.2027, 02:30 CET"
+    assert march_28.starts_at == datetime(2027, 3, 28, 1, 30, tzinfo=UTC)
+    assert format_due_local(march_28.starts_at) == "So, 28.03.2027, 03:30 CEST"
+    assert april_4.starts_at == datetime(2027, 4, 4, 0, 30, tzinfo=UTC)
+    assert format_due_local(april_4.starts_at) == "So, 04.04.2027, 02:30 CEST"
+    warnings = _warnings(caplog)
+    assert len(warnings) == 1
+    assert "2027-03-28 02:30" in warnings[0].getMessage()
+    assert "does not exist in Europe/Berlin" in warnings[0].getMessage()
+
+
+@pytest.mark.parametrize(
+    "fixture_name",
     ["dst_spring_gap_tzid.ics", "dst_spring_gap_floating.ics"],
 )
 def test_spring_gap_local_time_lands_at_0330_with_one_warning(fixture_name, caplog):
