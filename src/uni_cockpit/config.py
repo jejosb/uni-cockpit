@@ -2,6 +2,8 @@
 
 Secrets stay in the environment or the local database. Bot token and chat id
 are read only from ``TELEGRAM_BOT_TOKEN`` and ``TELEGRAM_CHAT_ID``.
+``CSRF_SECRET`` keys the CSRF tokens. Unset or blank means a random key per
+process, so open pages need a reload after a restart.
 ``reminder_offsets_hours`` is the raw ``REMINDER_OFFSETS_HOURS`` string.
 Parsing accepts whole ASCII hours from 1 to 720 and otherwise falls back to
 72,24 (see ``services.reminders``). Offsets are elapsed UTC hours (see the
@@ -28,6 +30,7 @@ class Settings(BaseSettings):
     relax_ical_url: str | None = Field(default=None, repr=False)
     hisinone_ical_url: str | None = Field(default=None, repr=False)
     database_url: str = "sqlite:///data/cockpit.db"
+    csrf_secret: str | None = Field(default=None, repr=False)
     # Off unless a developer opts in. A deployed server must not read local files.
     dev_allow_local_feeds: bool = False
     # Exact hosts only. The timetable host is not in this default.

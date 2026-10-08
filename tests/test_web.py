@@ -3,7 +3,6 @@ import re
 
 import httpx
 import pytest
-from fastapi.testclient import TestClient
 from sqlmodel import Session, select
 
 from tests.conftest import (
@@ -17,6 +16,7 @@ from tests.conftest import (
     poison_calendar_url,
     read_fixture,
 )
+from tests.conftest import CsrfTestClient as TestClient
 from uni_cockpit.app import create_app
 from uni_cockpit.config import Settings
 from uni_cockpit.models import CalendarEvent, FeedSource

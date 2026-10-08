@@ -4,11 +4,11 @@ import sqlite3
 from datetime import UTC, datetime
 
 import pytest
-from fastapi.testclient import TestClient
 from sqlalchemy.engine import Connection
 from sqlmodel import Session, select
 
 from tests.conftest import FROZEN_NOW, FixedClock, make_settings
+from tests.conftest import CsrfTestClient as TestClient
 from uni_cockpit.app import create_app
 from uni_cockpit.db import create_db_engine, init_db
 from uni_cockpit.models import CalendarEvent

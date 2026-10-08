@@ -28,6 +28,7 @@
       <p class="stored">Aktiv: <code>{{ masked_url }}</code></p>
     {% endif %}
     <form method="post" action="/settings">
+      <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token }}">
       <label for="calendar_url">Neue Kalender-URL</label>
       <input id="calendar_url" name="calendar_url" type="url" autocomplete="off" spellcheck="false" placeholder="https://relax.reutlingen-university.de/calendar/export_execute.php?…">
       <button type="submit">Speichern und importieren</button>
@@ -44,6 +45,7 @@
       <p class="stored">Aktiv: <code>{{ masked_hisinone_url }}</code></p>
     {% endif %}
     <form method="post" action="/settings/timetable">
+      <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token }}">
       <label for="hisinone_url">Stundenplan-URL</label>
       <input id="hisinone_url" name="hisinone_url" type="url" autocomplete="off" spellcheck="false" placeholder="https://example.edu/hisinone/timetable.ics?token=…">
       <button type="submit">Stundenplan speichern</button>

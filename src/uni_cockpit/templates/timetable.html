@@ -8,6 +8,7 @@
     </div>
     {% if page.has_url %}
       <form method="post" action="/stundenplan/import">
+        <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token }}">
         <input type="hidden" name="week" value="{{ page.monday }}">
         <button type="submit">Stundenplan aktualisieren</button>
       </form>

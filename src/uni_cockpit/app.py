@@ -5,13 +5,14 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from fastapi import FastAPI, Form, Request
+from fastapi import Depends, FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlmodel import Session, select
 
 from uni_cockpit.config import Settings
+from uni_cockpit.csrf import CsrfProtect, CsrfSessionMiddleware, require_csrf_token
 from uni_cockpit.db import create_db_engine, init_db
 from uni_cockpit.logging_config import configure_logging
 from uni_cockpit.models import FeedSource
@@ -118,8 +119,16 @@ def create_app(
             finally:
                 await app.state.reminders.stop()
 
-    app = FastAPI(title="uni-cockpit", lifespan=lifespan)
+    # Every POST, PUT, PATCH and DELETE route needs the session's CSRF token.
+    # The Telegram callback is not an HTTP route and keeps its chat id check.
+    app = FastAPI(
+        title="uni-cockpit",
+        lifespan=lifespan,
+        dependencies=[Depends(require_csrf_token)],
+    )
     app.state.settings = settings
+    app.state.csrf = CsrfProtect(settings.csrf_secret)
+    app.add_middleware(CsrfSessionMiddleware, protect=app.state.csrf)
     app.state.engine = engine
     app.state.fetcher = UrlCalendarFetcher(
         allow_local=settings.dev_allow_local_feeds,
