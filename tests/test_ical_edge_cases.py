@@ -8,7 +8,6 @@ only covers a missing UID and a missing DTSTART.
 import logging
 from datetime import UTC, datetime
 
-import pytest
 from sqlmodel import select
 
 from tests.conftest import SECRET_TOKEN, SECRET_URL, read_fixture
@@ -127,14 +126,6 @@ def test_unknown_tzid_does_not_drop_the_valid_sibling(session):
     assert rows[PRIOR].due_at == PRIOR_DUE
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "DTSTART;TZID=Mars/Olympus is stored as Europe/Berlin "
-        "(2026-10-08 18:00 local -> 16:00 UTC) but no WARNING names the "
-        "unknown TZID. see #17"
-    ),
-)
 def test_unknown_tzid_falls_back_to_berlin_and_warns(caplog):
     mars_uid = "evt-mars@calendar.example.edu"
     needle = f"UID:{mars_uid}\n".encode()
@@ -173,14 +164,6 @@ def test_non_utf8_bytes_do_not_abort_the_valid_sibling(session):
     assert rows[PRIOR].due_at == PRIOR_DUE
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "A SUMMARY byte that is not UTF-8 (latin-1 Café, 0xE9) is stored as "
-        "U+FFFD and is not skipped or logged. Story #1 requires a broken entry "
-        "to be skipped and logged while the valid sibling is kept. see #17"
-    ),
-)
 def test_non_utf8_summary_is_skipped_and_logged(caplog):
     with caplog.at_level(logging.WARNING):
         parsed = parse_icalendar(read_fixture("non_utf8_summary.ics"))
@@ -191,15 +174,6 @@ def test_non_utf8_summary_is_skipped_and_logged(caplog):
     assert all(record.levelno >= logging.WARNING for record in caplog.records)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "A VEVENT without END:VEVENT makes Calendar.from_ical raise ValueError, "
-        "so parse_icalendar raises CalendarParseError and the importer aborts. "
-        "The earlier complete VEVENT in the same feed is never imported. "
-        "Story #1: skip and log the broken entry and continue with the rest. see #17"
-    ),
-)
 def test_unclosed_vevent_is_skipped_and_the_sibling_is_imported(session, caplog):
     import_payload(session, read_fixture("known_good_deadline.ics"))
     payload = read_fixture("unclosed_vevent.ics")

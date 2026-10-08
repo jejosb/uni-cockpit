@@ -1,17 +1,25 @@
 """Parse an iCalendar feed into normalized events.
 
-Incomplete VEVENTs are skipped and logged. A feed that is not iCalendar at
-all raises `CalendarParseError` with a fixed message, so a secret in the
-body cannot leak into the error text.
+Incomplete VEVENTs, unclosed VEVENTs, and non-UTF-8 VEVENT blocks are skipped
+and logged. A feed that is not iCalendar at all raises `CalendarParseError`
+with a fixed message, so a secret in the body cannot leak into the error text.
 """
 
 import logging
+import re
 from dataclasses import dataclass
 from datetime import date, datetime
 
 from icalendar import Calendar
 
 from uni_cockpit.feeds.parsed import ParsedEvent
+from uni_cockpit.services.timezones import (
+    begin_warning_scope,
+    end_warning_scope,
+    remember_parse_warnings,
+    resolve_local,
+    warn_if_nonexistent,
+)
 from uni_cockpit.timeutil import BERLIN, ensure_utc
 
 logger = logging.getLogger(__name__)
@@ -25,43 +33,149 @@ class CalendarParseError(Exception):
 
 
 @dataclass(frozen=True)
+class BrokenEvent:
+    """A VEVENT dropped before parsing. ``position`` counts BEGIN:VEVENT lines from 1."""
+
+    position: int
+    reason: str
+    uid: str | None
+
+
+@dataclass(frozen=True)
 class ParseResult:
     events: list[ParsedEvent]
     skipped: list[str]
     skipped_uids: tuple[str, ...] = ()
 
 
-def parse_icalendar(payload: bytes | str) -> ParseResult:
+def load_calendar(payload: bytes | str) -> tuple[object, list[BrokenEvent]]:
+    """Read a feed and drop VEVENTs that are not closed or not valid UTF-8.
+
+    Returns the calendar and the dropped events, and logs nothing. Raises
+    `CalendarParseError` when the payload is not iCalendar at all.
+    """
     if isinstance(payload, str):
         payload = payload.encode("utf-8")
     try:
-        calendar = Calendar.from_ical(payload)
+        payload.decode("utf-8")
+        return Calendar.from_ical(payload), []
     except Exception:
-        logger.warning("calendar feed could not be parsed")
+        pass
+
+    if not re.search(rb"BEGIN:VCALENDAR", payload, re.IGNORECASE):
+        raise CalendarParseError
+
+    lines = payload.splitlines(keepends=True)
+    kept: list[bytes] = []
+    broken: list[BrokenEvent] = []
+
+    in_vevent = False
+    vevent_lines: list[bytes] = []
+    vevent_position = 0
+    vevent_uid: str | None = None
+
+    uid_pattern = re.compile(rb"^UID\b", re.IGNORECASE)
+
+    for line in lines:
+        stripped_upper = line.strip().upper()
+        if not in_vevent:
+            if stripped_upper.startswith(b"BEGIN:VEVENT"):
+                in_vevent = True
+                vevent_position += 1
+                vevent_lines = [line]
+                vevent_uid = None
+            else:
+                kept.append(line)
+        else:
+            if stripped_upper.startswith(b"BEGIN:VEVENT") or stripped_upper.startswith(
+                b"END:VCALENDAR"
+            ):
+                broken.append(BrokenEvent(vevent_position, "not closed", vevent_uid))
+                in_vevent = False
+                vevent_lines = []
+                vevent_uid = None
+                if stripped_upper.startswith(b"BEGIN:VEVENT"):
+                    in_vevent = True
+                    vevent_position += 1
+                    vevent_lines = [line]
+                else:
+                    kept.append(line)
+            elif stripped_upper.startswith(b"END:VEVENT"):
+                vevent_lines.append(line)
+                block_bytes = b"".join(vevent_lines)
+                try:
+                    block_bytes.decode("utf-8")
+                    kept.extend(vevent_lines)
+                except UnicodeDecodeError:
+                    broken.append(BrokenEvent(vevent_position, "not valid UTF-8", vevent_uid))
+                in_vevent = False
+                vevent_lines = []
+                vevent_uid = None
+            else:
+                vevent_lines.append(line)
+                if vevent_uid is None and uid_pattern.match(line):
+                    parts = line.split(b":", 1)
+                    if len(parts) == 2:
+                        val = parts[1].decode("utf-8", errors="replace").strip()
+                        if val:
+                            vevent_uid = val
+
+    if in_vevent:
+        broken.append(BrokenEvent(vevent_position, "not closed", vevent_uid))
+
+    try:
+        calendar = Calendar.from_ical(b"".join(kept))
+    except Exception:
         raise CalendarParseError from None
 
-    events: list[ParsedEvent] = []
-    skipped: list[str] = []
-    skipped_uids: list[str] = []
-    for index, component in enumerate(_vevents(calendar), start=1):
+    return calendar, broken
+
+
+def parse_icalendar(payload: bytes | str) -> ParseResult:
+    token = begin_warning_scope()
+    try:
         try:
-            parsed = _parse_event(component, index)
+            calendar, broken_events = load_calendar(payload)
+        except CalendarParseError:
+            logger.warning("calendar feed could not be parsed")
+            raise
         except Exception:
-            reason = f"skipping unreadable calendar event #{index}"
+            logger.warning("calendar feed could not be parsed")
+            raise CalendarParseError from None
+
+        events: list[ParsedEvent] = []
+        skipped: list[str] = []
+        skipped_uids: list[str] = []
+
+        for broken in broken_events:
+            reason = f"skipping broken calendar event #{broken.position} ({broken.reason})"
             logger.warning(reason)
             skipped.append(reason)
-            uid = _component_uid(component)
-            if uid:
-                skipped_uids.append(uid)
-            continue
-        if isinstance(parsed, str):
-            skipped.append(parsed)
-            uid = _component_uid(component)
-            if uid:
-                skipped_uids.append(uid)
-            continue
-        events.append(parsed)
-    return ParseResult(events=events, skipped=skipped, skipped_uids=tuple(skipped_uids))
+            if broken.uid:
+                skipped_uids.append(broken.uid)
+
+        for index, component in enumerate(_vevents(calendar), start=1):
+            try:
+                parsed = _parse_event(component, index)
+            except Exception:
+                reason = f"skipping unreadable calendar event #{index}"
+                logger.warning(reason)
+                skipped.append(reason)
+                uid = _component_uid(component)
+                if uid:
+                    skipped_uids.append(uid)
+                continue
+            if isinstance(parsed, str):
+                skipped.append(parsed)
+                uid = _component_uid(component)
+                if uid:
+                    skipped_uids.append(uid)
+                continue
+            events.append(parsed)
+        return ParseResult(events=events, skipped=skipped, skipped_uids=tuple(skipped_uids))
+    finally:
+        remember_parse_warnings()
+        end_warning_scope(token)
 
 
 def _component_uid(component) -> str | None:
@@ -80,13 +194,20 @@ def _vevents(calendar: object):
 def _parse_event(component, index: int) -> ParsedEvent | str:
     uid = _text(component, "uid")
     summary = _text(component, "summary")
-    start_raw = _decoded(component, "dtstart")
-    if not uid or not summary or start_raw is None:
+    start_prop = component.get("dtstart")
+    if not uid or not summary or start_prop is None:
+        start_raw = _decoded(component, "dtstart")
         reason = _skip_reason(index, uid, summary, start_raw)
         logger.warning(reason)
         return reason
 
-    starts_at, all_day = _normalize_instant(start_raw)
+    start_raw = getattr(start_prop, "dt", None)
+    if start_raw is None:
+        reason = _skip_reason(index, uid, summary, None)
+        logger.warning(reason)
+        return reason
+
+    starts_at, all_day = _normalize_instant(start_raw, _tzid(start_prop))
     ends_at = _optional_instant(component, "dtend")
     return ParsedEvent(
         uid=uid,
@@ -118,11 +239,27 @@ def _skip_reason(index: int, uid: str | None, summary: str | None, start_raw: ob
 
 
 def _optional_instant(component, name: str) -> datetime | None:
-    raw = _decoded(component, name)
+    prop = component.get(name)
+    if prop is None:
+        return None
+    raw = getattr(prop, "dt", None)
     if raw is None:
         return None
-    instant, _all_day = _normalize_instant(raw)
+    instant, _all_day = _normalize_instant(raw, _tzid(prop))
     return instant
+
+
+def _tzid(prop) -> str | None:
+    params = getattr(prop, "params", None)
+    if params is None:
+        return None
+    value = params.get("TZID")
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="replace")
+    text = str(value).strip()
+    return text or None
 
 
 def _zone_name(value: datetime | date) -> str:
@@ -138,10 +275,13 @@ def _zone_name(value: datetime | date) -> str:
     return "Europe/Berlin"
 
 
-def _normalize_instant(value: datetime | date) -> tuple[datetime, bool]:
+def _normalize_instant(value: datetime | date, tzid: str | None = None) -> tuple[datetime, bool]:
     if isinstance(value, datetime):
         if value.tzinfo is None:
-            value = value.replace(tzinfo=BERLIN)
+            if tzid is not None:
+                return resolve_local(value, tzid=tzid, unknown_tzid=True), False
+            return resolve_local(value), False
+        warn_if_nonexistent(value)
         return ensure_utc(value), False
     if isinstance(value, date):
         start = datetime.combine(value, datetime.min.time(), tzinfo=BERLIN)

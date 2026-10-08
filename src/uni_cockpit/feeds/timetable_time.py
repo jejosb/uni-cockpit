@@ -1,23 +1,18 @@
 """Local-time rules for the timetable only.
 
-TODO(#17): replace ``resolve_timetable_local`` with the shared helper in
-``services/timezones.py`` once that module exists. The RELAX parser stays
-as it is until then; this module does not change how deadlines are stored.
+Delegates to ``services/timezones.py``.
 """
 
 import logging
-from contextvars import ContextVar, Token
+from contextvars import Token
 from dataclasses import dataclass, replace
 from datetime import datetime
 
-from icalendar import Calendar
-
+from uni_cockpit.feeds.ical import CalendarParseError, load_calendar
 from uni_cockpit.feeds.parsed import ParsedEvent
-from uni_cockpit.timeutil import BERLIN, ensure_utc
+from uni_cockpit.services import timezones
 
 logger = logging.getLogger(__name__)
-
-_warned: ContextVar[set[str] | None] = ContextVar("timetable_time_warnings", default=None)
 
 
 @dataclass(frozen=True)
@@ -28,11 +23,11 @@ class _ClockHint:
 
 
 def begin_warning_scope() -> Token[set[str] | None]:
-    return _warned.set(set())
+    return timezones.begin_warning_scope(inherit_last_parse=True)
 
 
 def end_warning_scope(token: Token[set[str] | None]) -> None:
-    _warned.reset(token)
+    timezones.end_warning_scope(token)
 
 
 def resolve_timetable_local(
@@ -41,32 +36,8 @@ def resolve_timetable_local(
     *,
     unknown_tzid: bool = False,
 ) -> datetime:
-    """UTC instant for a timetable clock reading.
-
-    An unknown TZID is Europe/Berlin, not UTC. A civil time that does not
-    exist in the spring gap (02:30 on 28 March 2027) keeps the offset from
-    before the change: 01:30 UTC, shown later as 03:30 CEST.
-    """
-    naive = wall.replace(tzinfo=None)
-    if unknown_tzid:
-        label = tzid or "unknown"
-        _warn_once(
-            "tzid",
-            label,
-            "timetable time zone %s is unknown; using Europe/Berlin",
-            label,
-        )
-    if _spring_gap(naive):
-        stamp = naive.strftime("%Y-%m-%d %H:%M")
-        _warn_once(
-            "gap",
-            stamp,
-            "timetable local time %s does not exist in Europe/Berlin; "
-            "using the offset before the change",
-            stamp,
-        )
-    placed = datetime.combine(naive.date(), naive.time(), tzinfo=BERLIN)
-    return ensure_utc(placed)
+    """UTC instant for a timetable clock reading."""
+    return timezones.resolve_local(wall, tzid=tzid, unknown_tzid=unknown_tzid)
 
 
 def attach_feed_clocks(payload: bytes | str, events: list[ParsedEvent]) -> list[ParsedEvent]:
@@ -93,29 +64,10 @@ def attach_feed_clocks(payload: bytes | str, events: list[ParsedEvent]) -> list[
     return attached
 
 
-def _warn_once(kind: str, key: str, message: str, *args: object) -> None:
-    seen = _warned.get()
-    token = f"{kind}:{key}"
-    if seen is not None:
-        if token in seen:
-            return
-        seen.add(token)
-    logger.warning(message, *args)
-
-
-def _spring_gap(naive: datetime) -> bool:
-    """True when this Europe/Berlin civil time is skipped by the spring change."""
-    placed = datetime.combine(naive.date(), naive.time(), tzinfo=BERLIN)
-    back = ensure_utc(placed).astimezone(BERLIN)
-    return (back.date(), back.hour, back.minute) != (naive.date(), naive.hour, naive.minute)
-
-
 def _hints_by_uid(payload: bytes | str) -> dict[str, list[_ClockHint]]:
-    if isinstance(payload, str):
-        payload = payload.encode("utf-8")
     try:
-        calendar = Calendar.from_ical(payload)
-    except Exception:
+        calendar, _broken = load_calendar(payload)
+    except CalendarParseError:
         logger.warning("timetable clock hints could not be read")
         return {}
     grouped: dict[str, list[_ClockHint]] = {}
