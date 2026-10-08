@@ -60,8 +60,16 @@ class Occurrence:
 
 def expand_events(events: list[ParsedEvent]) -> tuple[list[Occurrence], int]:
     """Return concrete occurrences and how many series could not be expanded."""
+    occurrences, skipped_uids = expand_events_with_skipped(events)
+    return occurrences, len(skipped_uids)
+
+
+def expand_events_with_skipped(
+    events: list[ParsedEvent],
+) -> tuple[list[Occurrence], tuple[str, ...]]:
+    """Return concrete occurrences and the series UIDs of groups that could not be expanded."""
     occurrences: list[Occurrence] = []
-    skipped = 0
+    skipped_uids: list[str] = []
     scope = begin_warning_scope()
     try:
         for group in _groups(events):
@@ -69,10 +77,11 @@ def expand_events(events: list[ParsedEvent]) -> tuple[list[Occurrence], int]:
                 occurrences.extend(_expand_group(group))
             except Exception:
                 logger.warning("skipping a timetable recurrence that could not be expanded")
-                skipped += 1
+                if group and group[0].uid:
+                    skipped_uids.append(group[0].uid)
     finally:
         end_warning_scope(scope)
-    return occurrences, skipped
+    return occurrences, tuple(skipped_uids)
 
 
 def _groups(events: list[ParsedEvent]) -> list[list[ParsedEvent]]:

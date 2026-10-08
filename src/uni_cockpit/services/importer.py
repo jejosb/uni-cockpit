@@ -347,9 +347,9 @@ def upsert_events(
 
     Matching is ``(source, uid)``. Rows from any other source stay as they are,
     even when the UID is the same. ``skipped_uids`` count as still present, so
-    a known event the parser skipped is not marked removed. A draft with
-    ``cancelled`` sets ``removed_at``. On success the ``feed_sources`` row for
-    ``source`` is stored with ``last_sync_status='ok'`` and no message.
+    a known event or series the parser or adapter skipped is not marked removed.
+    A draft with ``cancelled`` sets ``removed_at``. On success the ``feed_sources``
+    row for ``source`` is stored with ``last_sync_status='ok'`` and no message.
     """
     created, updated, removed = _upsert(
         session,
@@ -415,9 +415,10 @@ def _upsert(
         stored = session.exec(select(CalendarEvent).where(CalendarEvent.source == source_key)).all()
         kept_skipped = 0
         for row in stored:
-            if row.uid in skipped_uids and row.removed_at is None and row.kind == "deadline":
+            skipped = _is_skipped(row.uid, skipped_uids)
+            if skipped and row.removed_at is None and row.kind == "deadline":
                 kept_skipped += 1
-            if row.uid in seen or row.removed_at is not None:
+            if skipped or row.uid in seen or row.removed_at is not None:
                 continue
             row.removed_at = now
             row.updated_at = now
@@ -438,6 +439,16 @@ def _upsert(
     session.add(source)
     session.commit()
     return created, updated, removed
+
+
+def _is_skipped(uid: str, skipped_uids: set[str]) -> bool:
+    """True when ``uid`` or the series it belongs to was skipped in this feed.
+
+    Timetable rows store occurrence UIDs (``<series-uid>#YYYYMMDDTHHMMSSZ``),
+    while the parser and the recurrence expansion report the series UID. A
+    skipped series therefore protects every stored occurrence of that series.
+    """
+    return uid in skipped_uids or uid.split("#", 1)[0] in skipped_uids
 
 
 def _new_event(source_id: int, source_key: str, draft: EventDraft, now: datetime) -> CalendarEvent:
@@ -514,6 +525,7 @@ def _import_timetable_events(session, payload, parsed, adapter: HisinoneTimetabl
     get_or_create_source(session, key="hisinone", title="HISinOne")
     events = attach_feed_clocks(payload, parsed.events)
     drafts = adapter.adapt_all(events)
+    all_skipped_uids = tuple(set(parsed.skipped_uids) | set(adapter.skipped_uids))
     skipped = len(parsed.skipped) + int(adapter.skipped or 0)
     if not _has_upcoming_lecture(drafts, moment):
         created, updated, _removed = _upsert(
@@ -543,7 +555,7 @@ def _import_timetable_events(session, payload, parsed, adapter: HisinoneTimetabl
         session,
         drafts,
         source="hisinone",
-        skipped_uids=parsed.skipped_uids,
+        skipped_uids=all_skipped_uids,
         now=moment,
     )
     _set_timetable_stale(session, False, moment)

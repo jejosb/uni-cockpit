@@ -18,12 +18,13 @@ from uni_cockpit.models import FeedSource
 from uni_cockpit.services.deadlines import deadline_views, parse_event_id, set_deadline_done
 from uni_cockpit.services.fetcher import UrlCalendarFetcher
 from uni_cockpit.services.importer import (
+    LOAD_FAILED_MESSAGE,
+    TIMETABLE_LOAD_FAILED_MESSAGE,
     CalendarImportError,
     effective_calendar_url,
     effective_hisinone_url,
     format_import_notice,
     format_timetable_notice,
-    import_timetable_from_configured_url,
     missing_hisinone_url_error,
     missing_url_error,
     save_calendar_url,
@@ -37,7 +38,11 @@ from uni_cockpit.services.reminders import (
 )
 from uni_cockpit.services.sync import (
     FeedRefresher,
+    RefreshImportError,
+    hisinone_configured,
+    import_timetable_blocking,
     parse_sync_interval_minutes,
+    record_timetable_failure,
     run_serialized_import,
 )
 from uni_cockpit.services.timetable import (
@@ -91,11 +96,13 @@ def create_app(
                     result = await run_serialized_import(app, reschedule_preserved=True)
                 except CalendarImportError as exc:
                     app.state.import_error = str(exc)
+                except RefreshImportError:
+                    app.state.import_error = LOAD_FAILED_MESSAGE
                 else:
                     if result is not None:
                         imported = True
                         app.state.import_notice = format_import_notice(result)
-            if app.state.settings.hisinone_url:
+            if hisinone_configured(app):
                 try:
                     timetable_result = await run_serialized_import(
                         app,
@@ -104,6 +111,9 @@ def create_app(
                     )
                 except CalendarImportError as exc:
                     app.state.timetable_error = str(exc)
+                except RefreshImportError:
+                    app.state.timetable_error = TIMETABLE_LOAD_FAILED_MESSAGE
+                    record_timetable_failure(app)
                 else:
                     if timetable_result is not None:
                         app.state.timetable_notice = format_timetable_notice(timetable_result)
@@ -268,19 +278,6 @@ def _set_done(request: Request, event_id: int, *, done: bool):
         return _render_partial(request, error=None, notice=notice, undo_id=undo_id)
     _store_flash(request, None, notice, undo_id=undo_id)
     return RedirectResponse("/", status_code=303)
-
-
-def import_timetable_blocking(app: FastAPI, now: datetime):
-    """HISinOne import used by ``run_serialized_import``. Runs in a worker thread."""
-    with Session(app.state.engine, expire_on_commit=False) as session:
-        if effective_hisinone_url(session, app.state.settings) is None:
-            return None
-        return import_timetable_from_configured_url(
-            session,
-            app.state.settings,
-            app.state.fetcher,
-            now=now,
-        )
 
 
 async def _import_timetable(app: FastAPI) -> tuple[str | None, str | None]:
