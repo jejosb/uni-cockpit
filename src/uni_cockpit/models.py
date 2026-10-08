@@ -2,8 +2,10 @@
 
 Rows are deduplicated by `(source, uid)`. `is_done` and `done_at` survive a
 re-import because the RELAX feed has no submission status. `removed_at` is
-reserved for events that disappear from a later fetch. Telegram reminders are
-not stored here; the process schedules them in memory from these rows.
+set when a later fetch no longer contains the event, or when the event arrives
+with `STATUS:CANCELLED`, and cleared when that event comes back. Telegram
+reminders are not stored here; the process schedules them in memory from these
+rows.
 """
 
 from datetime import datetime
@@ -26,14 +28,24 @@ class FeedSource(SQLModel, table=True):
     last_imported_at: datetime | None = Field(
         default=None, sa_column=Column(UtcDateTime(), nullable=True)
     )
+    last_sync_at: datetime | None = Field(
+        default=None, sa_column=Column(UtcDateTime(), nullable=True)
+    )
+    # ok, empty, or error. The cockpit reads this after a reload.
+    last_sync_status: str | None = None
+    last_sync_message: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
+    # Set when the last successful HISinOne import had no upcoming lectures.
+    timetable_stale: bool = Field(default=False)
 
 
 class CalendarEvent(SQLModel, table=True):
     __tablename__ = "calendar_events"
-    __table_args__ = (UniqueConstraint("source_id", "uid", name="uq_calendar_event_source_uid"),)
+    __table_args__ = (UniqueConstraint("source", "uid", name="uq_calendar_event_source_uid"),)
 
     id: int | None = Field(default=None, primary_key=True)
     source_id: int = Field(foreign_key="feed_sources.id", index=True)
+    # Which feed produced the row. Removal only touches the same value.
+    source: str = Field(default="relax", index=True)
     uid: str
     kind: str = Field(index=True)
     title: str

@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Protocol
 
 
 @dataclass(frozen=True)
@@ -16,6 +17,13 @@ class ParsedEvent:
     all_day: bool
     recurrence_rule: str | None
     exception_dates: tuple[datetime, ...]
+    recurrence_id: datetime | None = None
+    start_zone: str = "Europe/Berlin"
+    status: str | None = None
+    # Filled only by the timetable loader. The RELAX parser leaves these empty.
+    feed_tzid: str | None = None
+    feed_wall: datetime | None = None
+    feed_tzid_unknown: bool = False
 
 
 @dataclass(frozen=True)
@@ -38,3 +46,17 @@ class EventDraft:
     all_day: bool
     recurrence_rule: str | None
     exception_dates: str | None
+    cancelled: bool = False
+
+
+class FeedAdapter(Protocol):
+    """Turns one parsed VEVENT into a draft for a single feed source.
+
+    A second feed implements this structurally. It does not subclass the
+    protocol. ``source_key`` is the ``calendar_events.source`` value, and
+    ``adapt`` maps one ``ParsedEvent`` to an ``EventDraft``.
+    """
+
+    source_key: str
+
+    def adapt(self, event: ParsedEvent) -> EventDraft: ...

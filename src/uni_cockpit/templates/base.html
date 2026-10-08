@@ -16,6 +16,7 @@
       </div>
       <nav aria-label="Hauptnavigation">
         <a href="/" {% if request.url.path == "/" %}aria-current="page"{% endif %}>Fristen</a>
+        <a href="/stundenplan" {% if request.url.path == "/stundenplan" %}aria-current="page"{% endif %}>Stundenplan</a>
         <a href="/settings" {% if request.url.path == "/settings" %}aria-current="page"{% endif %}>Kalender</a>
       </nav>
     </header>

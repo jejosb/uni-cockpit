@@ -1,0 +1,17 @@
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//uni-cockpit//anonymized hisinone fixture//EN
+CALSCALE:GREGORIAN
+METHOD:PUBLISH
+BEGIN:VEVENT
+UID:his-mars@calendar.example.edu
+SUMMARY:Olympus lecture
+DESCRIPTION:Feed https://calendar.example.edu/hisinone/timetable.ics?token=fixture-his-token-not-real
+CATEGORIES:ORBIT
+LOCATION:Room 4.12
+DTSTAMP:20261001T080000Z
+DTSTART;TZID=Mars/Olympus:20261008T180000
+DTEND;TZID=Mars/Olympus:20261008T193000
+RRULE:FREQ=WEEKLY;COUNT=3
+END:VEVENT
+END:VCALENDAR

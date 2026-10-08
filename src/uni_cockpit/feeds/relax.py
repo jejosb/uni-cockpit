@@ -57,4 +57,10 @@ class RelaxDeadlineAdapter:
             all_day=event.all_day,
             recurrence_rule=event.recurrence_rule,
             exception_dates=exceptions or None,
+            cancelled=_is_cancelled(event.status),
         )
+
+
+def _is_cancelled(status: str | None) -> bool:
+    """Moodle uses the iCalendar STATUS value CANCELLED for a withdrawn event."""
+    return status is not None and status.strip().upper() == "CANCELLED"

@@ -82,11 +82,11 @@ main { padding-bottom: 3rem; }
   margin: 0.5rem 0 1.25rem;
 }
 
-h1, h2 { font-family: Palatino, "Palatino Linotype", Georgia, serif; font-weight: 600; }
+h1, h2, h3 { font-family: Palatino, "Palatino Linotype", Georgia, serif; font-weight: 600; }
 
 h1 { margin: 0; font-size: 2.4rem; line-height: 1; }
 
-h2 { margin: 0; font-size: 1.25rem; }
+h2, h3 { margin: 0; font-size: 1.25rem; }
 
 .lede, .course, .due, .hint, .stored, .site-footer p { color: var(--muted); }
 
@@ -104,6 +104,26 @@ button, .text-link {
 }
 
 button:hover, .text-link:hover { background: var(--green-deep); }
+
+button.button-quiet {
+  background: transparent;
+  color: var(--green);
+  border: 1px solid var(--green);
+  padding: 0.35rem 0.8rem;
+}
+
+button.button-quiet:hover { background: var(--notice-bg); color: var(--green-deep); }
+
+.done-form { margin: 0.7rem 0 0; }
+
+.undo-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+}
+
+.undo-row form { margin: 0; }
 
 .banner {
   margin: 0 0 1rem;
@@ -196,10 +216,58 @@ input[type="url"] {
 
 .site-footer { padding-bottom: 2rem; }
 
+.week-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1.25rem;
+  margin: 0 0 1rem;
+}
+
+.week-nav a {
+  color: var(--green-deep);
+  font-weight: 600;
+}
+
+.today-lectures { margin-bottom: 1.5rem; }
+
+.day-group { margin: 0 0 1.25rem; }
+
+.day-group h2 { margin-bottom: 0.55rem; }
+
+.lectures {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.75rem;
+}
+
+.lecture {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1.1rem;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  box-shadow: var(--shadow);
+}
+
+.room {
+  margin: 0;
+  color: var(--ink);
+  font-weight: 600;
+  text-align: right;
+}
+
+.badge-today { background: var(--green); }
+
 @media (max-width: 680px) {
-  .site-header, .page-head, .deadline { display: block; }
-  .deadline-meta { text-align: left; margin-top: 0.7rem; }
+  .site-header, .page-head, .deadline, .lecture { display: block; }
+  .deadline-meta, .room { text-align: left; margin-top: 0.7rem; }
   nav { margin-top: 0.8rem; }
   h1 { font-size: 2rem; }
   .page-head button { margin-top: 0.8rem; }
+  .undo-row { display: block; }
+  .undo-row form { margin-top: 0.6rem; }
 }

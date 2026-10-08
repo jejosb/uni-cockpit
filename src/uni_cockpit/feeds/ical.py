@@ -28,6 +28,7 @@ class CalendarParseError(Exception):
 class ParseResult:
     events: list[ParsedEvent]
     skipped: list[str]
+    skipped_uids: tuple[str, ...] = ()
 
 
 def parse_icalendar(payload: bytes | str) -> ParseResult:
@@ -41,6 +42,7 @@ def parse_icalendar(payload: bytes | str) -> ParseResult:
 
     events: list[ParsedEvent] = []
     skipped: list[str] = []
+    skipped_uids: list[str] = []
     for index, component in enumerate(_vevents(calendar), start=1):
         try:
             parsed = _parse_event(component, index)
@@ -48,12 +50,25 @@ def parse_icalendar(payload: bytes | str) -> ParseResult:
             reason = f"skipping unreadable calendar event #{index}"
             logger.warning(reason)
             skipped.append(reason)
+            uid = _component_uid(component)
+            if uid:
+                skipped_uids.append(uid)
             continue
         if isinstance(parsed, str):
             skipped.append(parsed)
+            uid = _component_uid(component)
+            if uid:
+                skipped_uids.append(uid)
             continue
         events.append(parsed)
-    return ParseResult(events=events, skipped=skipped)
+    return ParseResult(events=events, skipped=skipped, skipped_uids=tuple(skipped_uids))
+
+
+def _component_uid(component) -> str | None:
+    try:
+        return _text(component, "uid")
+    except Exception:
+        return None
 
 
 def _vevents(calendar: object):
@@ -84,6 +99,9 @@ def _parse_event(component, index: int) -> ParsedEvent | str:
         all_day=all_day,
         recurrence_rule=_recurrence_rule(component),
         exception_dates=_exception_instants(component),
+        recurrence_id=_optional_instant(component, "recurrence-id"),
+        start_zone=_zone_name(start_raw),
+        status=_text(component, "status"),
     )
 
 
@@ -105,6 +123,19 @@ def _optional_instant(component, name: str) -> datetime | None:
         return None
     instant, _all_day = _normalize_instant(raw)
     return instant
+
+
+def _zone_name(value: datetime | date) -> str:
+    """IANA name of a feed instant, before it is stored as UTC.
+
+    Zulu values keep ``UTC``. Naive values and bare dates are read as
+    Europe/Berlin, matching `_normalize_instant`.
+    """
+    if isinstance(value, datetime) and value.tzinfo is not None:
+        key = getattr(value.tzinfo, "key", None)
+        if isinstance(key, str) and key:
+            return key
+    return "Europe/Berlin"
 
 
 def _normalize_instant(value: datetime | date) -> tuple[datetime, bool]:
