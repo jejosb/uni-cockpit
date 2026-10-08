@@ -102,14 +102,6 @@ def test_valid_sibling_of_a_spring_gap_is_stored_at_10_utc(session, fixture):
     "fixture",
     ["dst_spring_gap_tzid.ics", "dst_spring_gap_floating.ics"],
 )
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "2027-03-28 02:30 does not exist in Europe/Berlin. The parser stores "
-        "01:30 UTC and shows 'So, 28.03.2027, 03:30 CEST', but no WARNING is "
-        "logged. see #17"
-    ),
-)
 def test_nonexistent_spring_local_time_shifts_to_0330_and_warns(caplog, fixture):
     with caplog.at_level(logging.WARNING):
         parsed = parse_icalendar(read_fixture(fixture))
