@@ -9,7 +9,7 @@ import re
 
 from uni_cockpit.feeds.ical import parse_icalendar
 from uni_cockpit.feeds.parsed import EventDraft, ParsedEvent
-from uni_cockpit.feeds.recurrence import Occurrence, expand_events
+from uni_cockpit.feeds.recurrence import Occurrence, expand_events_with_skipped
 from uni_cockpit.feeds.timetable_time import attach_feed_clocks
 from uni_cockpit.timeutil import ensure_utc
 
@@ -66,6 +66,7 @@ class HisinoneTimetableAdapter:
 
     def __init__(self) -> None:
         self.skipped = 0
+        self.skipped_uids: tuple[str, ...] = ()
 
     def adapt(self, event: ParsedEvent) -> EventDraft:
         exceptions = ",".join(ensure_utc(moment).isoformat() for moment in event.exception_dates)
@@ -86,7 +87,8 @@ class HisinoneTimetableAdapter:
         )
 
     def adapt_all(self, events: list[ParsedEvent]) -> list[EventDraft]:
-        occurrences, self.skipped = expand_events(events)
+        occurrences, self.skipped_uids = expand_events_with_skipped(events)
+        self.skipped = len(self.skipped_uids)
         return [self.adapt(_as_parsed(item)) for item in occurrences]
 
 

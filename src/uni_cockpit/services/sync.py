@@ -1,4 +1,4 @@
-"""Periodic re-fetch of the configured RELAX feed.
+"""Periodic re-fetch of the configured RELAX feed and HISinOne timetable.
 
 The blocking download and iCalendar parse run in a worker thread so the
 FastAPI event loop stays free. The job uses ``app.state.settings`` and
@@ -8,6 +8,12 @@ It does not read the environment again and does not build a second fetcher.
 One process, one task. ``start`` is idempotent and the lifespan stops the task
 on shutdown. A failed fetch logs a fixed message and leaves existing rows
 unchanged. After a successful import the caller reschedules reminders.
+
+When ``HISINONE_ICAL_URL`` is set, each run also refreshes the HISinOne
+timetable. Both feeds use the same import lock and fetcher, and each writes
+its own sync status (``source="relax"`` or ``source="hisinone"``). A failure
+of one feed leaves the other feed's rows and status unchanged. A HISinOne URL
+that is only stored on the settings page is not refreshed automatically.
 """
 
 import asyncio
@@ -20,10 +26,14 @@ from fastapi import FastAPI
 from sqlmodel import Session
 
 from uni_cockpit.services.importer import (
+    TIMETABLE_LOAD_FAILED_MESSAGE,
     CalendarImportError,
     ImportResult,
     effective_calendar_url,
+    effective_hisinone_url,
     import_from_configured_url,
+    import_timetable_from_configured_url,
+    record_sync_status,
 )
 
 
@@ -71,7 +81,7 @@ def _parse_interval(raw: str) -> int:
 
 
 class FeedRefresher:
-    """Re-imports the RELAX feed on a fixed interval.
+    """Re-imports the RELAX feed, and HISinOne when configured, on a fixed interval.
 
     ``interval`` is how long to wait between imports. Production passes
     ``timedelta(minutes=parse_sync_interval_minutes(...))``. Tests can pass a
@@ -115,9 +125,18 @@ class FeedRefresher:
     async def refresh_once(self) -> bool:
         """Import once off the event loop, then reschedule. False keeps the rows.
 
+        The return value only reports the RELAX import. When
+        ``HISINONE_ICAL_URL`` is set, the timetable is refreshed afterwards,
+        whatever the RELAX outcome was, and its failure never changes RELAX.
         A failure inside ``reschedule`` propagates so the refresh loop can log
         it and keep waiting for the next interval.
         """
+        relax_ok = await self._refresh_relax()
+        if self._app.state.settings.hisinone_url:
+            await self._refresh_timetable()
+        return relax_ok
+
+    async def _refresh_relax(self) -> bool:
         try:
             result = await run_serialized_import(self._app, reschedule_preserved=False)
         except CalendarImportError:
@@ -133,6 +152,33 @@ class FeedRefresher:
             return False
         logger.info(
             "Periodic calendar refresh finished: %s new, %s updated, %s removed, %s skipped.",
+            result.created,
+            result.updated,
+            result.removed,
+            result.skipped,
+        )
+        return True
+
+    async def _refresh_timetable(self) -> bool:
+        """Refresh HISinOne. A failure keeps the lectures and leaves RELAX alone."""
+        try:
+            result = await run_serialized_import(
+                self._app, import_timetable_blocking, reschedule_preserved=False
+            )
+        except CalendarImportError:
+            logger.warning("periodic timetable refresh failed; existing lectures were kept")
+            return False
+        except RefreshImportError as exc:
+            logger.warning(
+                "periodic timetable refresh failed (%s); existing lectures were kept",
+                exc.exc_type,
+            )
+            record_timetable_failure(self._app)
+            return False
+        if result is None:
+            return False
+        logger.info(
+            "Periodic timetable refresh finished: %s new, %s updated, %s removed, %s skipped.",
             result.created,
             result.updated,
             result.removed,
@@ -158,11 +204,39 @@ class FeedRefresher:
                 )
 
 
+def record_timetable_failure(app: FastAPI) -> None:
+    """Store a generic HISinOne error status after an unexpected import failure.
+
+    Only ``source="hisinone"`` is written, so the RELAX status stays as it was.
+    """
+    with Session(app.state.engine, expire_on_commit=False) as session:
+        record_sync_status(
+            session,
+            source="hisinone",
+            status="error",
+            message=TIMETABLE_LOAD_FAILED_MESSAGE,
+            now=app.state.clock.now(),
+        )
+
+
 def import_blocking(app: FastAPI, now: datetime):
     with Session(app.state.engine, expire_on_commit=False) as session:
         if effective_calendar_url(session, app.state.settings) is None:
             return None
         return import_from_configured_url(
+            session,
+            app.state.settings,
+            app.state.fetcher,
+            now=now,
+        )
+
+
+def import_timetable_blocking(app: FastAPI, now: datetime):
+    """HISinOne import used by ``run_serialized_import``. Runs in a worker thread."""
+    with Session(app.state.engine, expire_on_commit=False) as session:
+        if effective_hisinone_url(session, app.state.settings) is None:
+            return None
+        return import_timetable_from_configured_url(
             session,
             app.state.settings,
             app.state.fetcher,
