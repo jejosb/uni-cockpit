@@ -39,6 +39,7 @@ from uni_cockpit.services.reminders import (
 from uni_cockpit.services.sync import (
     FeedRefresher,
     RefreshImportError,
+    hisinone_configured,
     import_timetable_blocking,
     parse_sync_interval_minutes,
     record_timetable_failure,
@@ -101,7 +102,7 @@ def create_app(
                     if result is not None:
                         imported = True
                         app.state.import_notice = format_import_notice(result)
-            if app.state.settings.hisinone_url:
+            if hisinone_configured(app):
                 try:
                     timetable_result = await run_serialized_import(
                         app,

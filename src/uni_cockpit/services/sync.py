@@ -9,11 +9,12 @@ One process, one task. ``start`` is idempotent and the lifespan stops the task
 on shutdown. A failed fetch logs a fixed message and leaves existing rows
 unchanged. After a successful import the caller reschedules reminders.
 
-When ``HISINONE_ICAL_URL`` is set, each run also refreshes the HISinOne
-timetable. Both feeds use the same import lock and fetcher, and each writes
-its own sync status (``source="relax"`` or ``source="hisinone"``). A failure
-of one feed leaves the other feed's rows and status unchanged. A HISinOne URL
-that is only stored on the settings page is not refreshed automatically.
+When ``HISINONE_ICAL_URL`` is set or a URL is saved on the settings page
+(env wins), each run also refreshes the HISinOne timetable. Both feeds use
+the same import lock and fetcher, and each writes its own sync status
+(``source="relax"`` or ``source="hisinone"``). A failure of one feed leaves
+the other feed's rows and status unchanged. When neither exists HISinOne is
+skipped without a fetch and without writing a sync status.
 """
 
 import asyncio
@@ -126,13 +127,14 @@ class FeedRefresher:
         """Import once off the event loop, then reschedule. False keeps the rows.
 
         The return value only reports the RELAX import. When
-        ``HISINONE_ICAL_URL`` is set, the timetable is refreshed afterwards,
-        whatever the RELAX outcome was, and its failure never changes RELAX.
-        A failure inside ``reschedule`` propagates so the refresh loop can log
-        it and keep waiting for the next interval.
+        ``HISINONE_ICAL_URL`` is set or a HISinOne URL is saved on the settings
+        page (the environment variable wins), the timetable is refreshed
+        afterwards, whatever the RELAX outcome was, and its failure never
+        changes RELAX. A failure inside ``reschedule`` propagates so the
+        refresh loop can log it and keep waiting for the next interval.
         """
         relax_ok = await self._refresh_relax()
-        if self._app.state.settings.hisinone_url:
+        if hisinone_configured(self._app):
             await self._refresh_timetable()
         return relax_ok
 
@@ -202,6 +204,12 @@ class FeedRefresher:
                 logger.exception(
                     "periodic calendar refresh failed; the next interval will try again"
                 )
+
+
+def hisinone_configured(app: FastAPI) -> bool:
+    """True when HISINONE_ICAL_URL or a URL saved on the settings page exists."""
+    with Session(app.state.engine, expire_on_commit=False) as session:
+        return effective_hisinone_url(session, app.state.settings) is not None
 
 
 def record_timetable_failure(app: FastAPI) -> None:

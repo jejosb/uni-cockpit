@@ -10,7 +10,7 @@ from tests.conftest import FROZEN_NOW, FixedClock, make_settings, read_fixture
 from uni_cockpit.app import create_app
 from uni_cockpit.models import CalendarEvent, FeedSource
 from uni_cockpit.services.fetcher import FeedFetchError
-from uni_cockpit.services.importer import TIMETABLE_LOAD_FAILED_MESSAGE
+from uni_cockpit.services.importer import TIMETABLE_LOAD_FAILED_MESSAGE, save_hisinone_url
 
 RELAX_URL = "https://relax.reutlingen-university.de/export?token=fixture-not-real"
 HIS_URL = "https://timetable.example.edu/his.ics"
@@ -142,3 +142,59 @@ def test_refresh_without_hisinone_url_only_fetches_relax(tmp_path):
     assert asyncio.run(app.state.feed_sync.refresh_once()) is True
     assert app.state.fetcher.urls == [RELAX_URL]
     assert _status(app, "hisinone") is None
+
+
+STORED_HIS_URL = "https://stored-timetable.example.invalid/his.ics"
+ENV_HIS_URL = "https://env-timetable.example.invalid/his.ics"
+
+
+def _store_his_url(app, url):
+    with Session(app.state.engine) as session:
+        save_hisinone_url(session, url)
+
+
+def test_startup_imports_stored_hisinone_url_without_env(tmp_path):
+    app = _app(tmp_path, {RELAX_URL: RELAX, STORED_HIS_URL: HIS}, his=False)
+    _store_his_url(app, STORED_HIS_URL)
+    with TestClient(app):
+        assert STORED_HIS_URL in app.state.fetcher.urls
+        assert _rows(app, "hisinone")
+        assert _status(app, "hisinone")[0] == "ok"
+        assert _rows(app, "relax")
+
+
+def test_refresh_imports_stored_hisinone_url_without_env(tmp_path):
+    app = _app(tmp_path, {RELAX_URL: RELAX, STORED_HIS_URL: HIS}, his=False)
+    _store_his_url(app, STORED_HIS_URL)
+    assert asyncio.run(app.state.feed_sync.refresh_once()) is True
+    assert app.state.fetcher.urls == [RELAX_URL, STORED_HIS_URL]
+    assert _rows(app, "hisinone")
+    assert _status(app, "hisinone")[0] == "ok"
+
+
+def test_no_hisinone_url_skips_timetable_at_startup_and_refresh(tmp_path):
+    app = _app(tmp_path, {RELAX_URL: RELAX}, his=False)
+    with TestClient(app):
+        assert app.state.fetcher.urls == [RELAX_URL]
+        assert _status(app, "hisinone") is None
+        assert getattr(app.state, "timetable_error", None) is None
+        assert _status(app, "relax")[0] == "ok"
+    assert asyncio.run(app.state.feed_sync.refresh_once()) is True
+    assert app.state.fetcher.urls == [RELAX_URL, RELAX_URL]
+    assert _status(app, "hisinone") is None
+    assert _rows(app, "hisinone") == []
+    assert _status(app, "relax")[0] == "ok"
+
+
+def test_env_hisinone_url_wins_over_stored_url(tmp_path):
+    app = create_app(make_settings(tmp_path, RELAX_URL, hisinone_ical_url=ENV_HIS_URL))
+    app.state.clock = FixedClock(FROZEN_NOW)
+    app.state.reminders = _NoReminders()
+    app.state.fetcher = _RoutingFetcher({RELAX_URL: RELAX, ENV_HIS_URL: HIS})
+    _store_his_url(app, STORED_HIS_URL)
+    with TestClient(app):
+        assert ENV_HIS_URL in app.state.fetcher.urls
+        assert STORED_HIS_URL not in app.state.fetcher.urls
+    app.state.fetcher = _RoutingFetcher({RELAX_URL: RELAX, ENV_HIS_URL: HIS})
+    assert asyncio.run(app.state.feed_sync.refresh_once()) is True
+    assert app.state.fetcher.urls == [RELAX_URL, ENV_HIS_URL]
