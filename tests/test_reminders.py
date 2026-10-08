@@ -6,11 +6,11 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
-from fastapi.testclient import TestClient
 from sqlmodel import Session
 from telegram.ext import JobQueue
 
 from tests.conftest import FIXTURES, FROZEN_NOW, FixedClock, make_settings, read_fixture
+from tests.conftest import CsrfTestClient as TestClient
 from uni_cockpit.app import create_app
 from uni_cockpit.services.deadlines import list_open_deadlines
 from uni_cockpit.services.importer import import_payload

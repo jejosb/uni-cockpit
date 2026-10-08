@@ -7,6 +7,7 @@
       <p class="lede">Sortiert nach Fälligkeit. Datum und Uhrzeit in Europe/Berlin.</p>
     </div>
     <form method="post" action="/import" hx-post="/import" hx-target="#cockpit" hx-swap="innerHTML">
+      <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token }}">
       <button type="submit">Jetzt aktualisieren</button>
     </form>
   </section>

@@ -3,9 +3,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 from sqlmodel import Session
 
 from uni_cockpit.config import Settings
+from uni_cockpit.csrf import CSRF_HEADER, SAFE_METHODS, SESSION_COOKIE
 from uni_cockpit.db import create_db_engine, init_db
 from uni_cockpit.logging_config import configure_logging
 
@@ -55,6 +57,28 @@ class FixedClock:
         return self.instant
 
 
+class CsrfTestClient(TestClient):
+    """TestClient that sends the session's CSRF token like the browser does.
+
+    Writing requests get the session cookie and the matching ``X-CSRF-Token``
+    header, so the protection stays on in every test. Pass ``csrf=False`` to
+    send a request without a token. ``tests/test_csrf.py`` uses the plain
+    ``TestClient`` and reads the token from the rendered page instead.
+    """
+
+    def request(self, method: str, url, **kwargs):  # type: ignore[override]
+        send_token = kwargs.pop("csrf", True)
+        if send_token and method.upper() not in SAFE_METHODS:
+            session_id = self.cookies.get(SESSION_COOKIE)
+            if session_id is None:
+                session_id = self.app.state.csrf.new_session_id()
+                self.cookies.set(SESSION_COOKIE, session_id)
+            headers = dict(kwargs.pop("headers", None) or {})
+            headers.setdefault(CSRF_HEADER, self.app.state.csrf.token_for(session_id))
+            kwargs["headers"] = headers
+        return super().request(method, url, **kwargs)
+
+
 @pytest.fixture(autouse=True)
 def _redacting_logs():
     configure_logging()
@@ -85,14 +109,15 @@ def make_settings(
     telegram_chat_id: str | None = None,
     sync_interval_minutes: str = "60",
     hisinone_ical_url: str | None = None,
+    csrf_secret: str | None = None,
 ) -> Settings:
     """Test apps load fixtures via file://, so the dev flag defaults to on.
 
     Pass `allow_local=False` to exercise the production policy. The value is
     explicit Settings state, not an environment fallback. `allowed_hosts`
     overrides `FEED_ALLOWED_HOSTS`; omitted, the production default is used.
-    Reminder offsets and Telegram credentials are explicit too, so a developer
-    environment cannot leak into the tests.
+    Reminder offsets, Telegram credentials and the CSRF secret are explicit
+    too, so a developer environment cannot leak into the tests.
     """
     hosts = "relax.reutlingen-university.de" if allowed_hosts is None else allowed_hosts
     return Settings(
@@ -105,5 +130,6 @@ def make_settings(
         telegram_chat_id=telegram_chat_id,
         sync_interval_minutes=sync_interval_minutes,
         hisinone_ical_url=hisinone_ical_url,
+        csrf_secret=csrf_secret,
         _env_file=None,
     )

@@ -12,7 +12,6 @@ from datetime import timedelta
 from types import SimpleNamespace
 
 import pytest
-from fastapi.testclient import TestClient
 from sqlmodel import Session, select
 from telegram.ext import CallbackQueryHandler, JobQueue
 
@@ -25,6 +24,7 @@ from tests.conftest import (
     make_settings,
     read_fixture,
 )
+from tests.conftest import CsrfTestClient as TestClient
 from tests.test_reminders import _FakeApplication
 from uni_cockpit.app import create_app
 from uni_cockpit.feeds.ical import parse_icalendar

@@ -1,10 +1,10 @@
 import logging
 import re
 
-from fastapi.testclient import TestClient
 from sqlmodel import Session, select
 
 from tests.conftest import FIXTURES, FROZEN_NOW, FixedClock, make_settings, read_fixture
+from tests.conftest import CsrfTestClient as TestClient
 from uni_cockpit.app import create_app
 from uni_cockpit.models import CalendarEvent
 from uni_cockpit.services.fetcher import FeedFetchError, UrlCalendarFetcher
