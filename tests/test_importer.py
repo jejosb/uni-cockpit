@@ -337,6 +337,12 @@ def test_fixtures_and_example_env_keep_secrets_out_of_band():
     assert SECRET_TOKEN not in example
 
 
+def test_example_env_has_one_line_per_feed_url():
+    example = (FIXTURES.parents[1] / ".env.example").read_text(encoding="utf-8")
+    for name in ("RELAX_ICAL_URL", "HISINONE_ICAL_URL"):
+        assert [line for line in example.splitlines() if name in line] == [f"{name}="]
+
+
 def test_import_payload_honors_a_feed_adapter(session):
     """A second feed passes its own adapter. The class does not subclass the protocol."""
     get_or_create_source(session, key="hisinone", title="HISinOne")

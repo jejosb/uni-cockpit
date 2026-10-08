@@ -47,11 +47,13 @@ The URL looks like this:
 Python 3.12 is required.
 
 ```bash
-python -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
 cp .env.example .env
 ```
+
+Inside the activated virtual environment, `python` and `pip` point to the venv, so later commands can use `python` again.
 
 Put the export URL in `.env` as `RELAX_ICAL_URL`. You can also leave that variable empty and paste the URL on the Kalender page. The page stores it in `data/cockpit.db`, which is git-ignored. When both are set, the environment variable wins.
 
